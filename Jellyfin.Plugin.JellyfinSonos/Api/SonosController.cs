@@ -1,6 +1,8 @@
 using System;
+using System.IO;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.JellyfinSonos.Services;
+using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -17,6 +19,7 @@ public class SonosController : ControllerBase
 {
     private readonly LinkCodeService _linkCodeService;
     private readonly IUserManager _userManager;
+    private readonly ILibraryManager _libraryManager;
     private readonly ILogger<SonosController> _logger;
 
     /// <summary>
@@ -24,14 +27,17 @@ public class SonosController : ControllerBase
     /// </summary>
     /// <param name="linkCodeService">Link code service.</param>
     /// <param name="userManager">User manager.</param>
+    /// <param name="libraryManager">Library manager.</param>
     /// <param name="logger">Logger.</param>
     public SonosController(
         LinkCodeService linkCodeService,
         IUserManager userManager,
+        ILibraryManager libraryManager,
         ILogger<SonosController> logger)
     {
         _linkCodeService = linkCodeService;
         _userManager = userManager;
+        _libraryManager = libraryManager;
         _logger = logger;
     }
 
@@ -248,14 +254,8 @@ public class SonosController : ControllerBase
 
     /// <summary>
     /// Stream endpoint for serving audio.
-    /// NOTE: This is a placeholder implementation. For production use, this endpoint should:
-    /// 1. Extract and validate user credentials from Authorization header
-    /// 2. Authenticate the user with Jellyfin
-    /// 3. Get the track item from Jellyfin using the trackId
-    /// 4. Return a FileStreamResult with the audio file
-    /// 5. Handle transcoding if needed
     /// </summary>
-    /// <param name="trackId">Track ID.</param>
+    /// <param name="trackId">Track ID (GUID).</param>
     /// <returns>Audio stream.</returns>
     [HttpGet("stream/{trackId}")]
     [AllowAnonymous]
@@ -264,26 +264,71 @@ public class SonosController : ControllerBase
         try
         {
             _logger.LogInformation("Stream request for track: {TrackId}", trackId);
-            
-            // TODO: Implement actual streaming:
-            // 1. Parse trackId to extract Jellyfin item GUID
-            // 2. Extract auth token from Authorization header
-            // 3. Decrypt token to get user credentials
-            // 4. Authenticate user
-            // 5. Get item from library manager
-            // 6. Return file stream with proper MIME type
-            // Example:
-            // var item = _libraryManager.GetItemById(guid);
-            // var stream = File.OpenRead(item.Path);
-            // return File(stream, "audio/mpeg");
-            
-            return NotFound("Stream endpoint requires full implementation - see code comments");
+
+            // Parse track ID
+            if (!Guid.TryParse(trackId, out var itemId))
+            {
+                _logger.LogWarning("Invalid track ID format: {TrackId}", trackId);
+                return BadRequest("Invalid track ID");
+            }
+
+            // Get the item from library
+            var item = _libraryManager.GetItemById(itemId);
+            if (item == null)
+            {
+                _logger.LogWarning("Track not found: {TrackId}", trackId);
+                return NotFound("Track not found");
+            }
+
+            if (item is not Audio audioItem)
+            {
+                _logger.LogWarning("Item is not an audio file: {TrackId}", trackId);
+                return BadRequest("Item is not an audio file");
+            }
+
+            // Check if file exists
+            if (string.IsNullOrEmpty(audioItem.Path) || !System.IO.File.Exists(audioItem.Path))
+            {
+                _logger.LogWarning("Audio file not found: {Path}", audioItem.Path);
+                return NotFound("Audio file not found");
+            }
+
+            // Determine MIME type
+            var mimeType = GetMimeType(audioItem.Path);
+
+            // Open file stream
+            var stream = new FileStream(audioItem.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+            // Return file stream
+            _logger.LogInformation("Streaming track: {TrackName} ({Path})", audioItem.Name, audioItem.Path);
+            return File(stream, mimeType, enableRangeProcessing: true);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error streaming track");
             return StatusCode(500, "Error streaming track");
         }
+    }
+
+    private static string GetMimeType(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return "audio/mpeg";
+        }
+
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        return ext switch
+        {
+            ".mp3" => "audio/mpeg",
+            ".flac" => "audio/flac",
+            ".m4a" => "audio/mp4",
+            ".aac" => "audio/aac",
+            ".ogg" => "audio/ogg",
+            ".wav" => "audio/wav",
+            ".wma" => "audio/x-ms-wma",
+            _ => "audio/mpeg"
+        };
     }
 }
 

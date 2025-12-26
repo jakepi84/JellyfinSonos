@@ -58,6 +58,9 @@ public class SmapiController : ControllerBase
             nsmgr.AddNamespace("soap", "http://schemas.xmlsoap.org/soap/envelope/");
             nsmgr.AddNamespace("ns", "http://www.sonos.com/Services/1.1");
 
+            // Extract auth token from SOAP headers
+            var authToken = ExtractAuthToken(doc, nsmgr);
+
             // Extract the method name
             var bodyNode = doc.SelectSingleNode("//soap:Body", nsmgr);
             if (bodyNode == null || bodyNode.FirstChild == null)
@@ -90,13 +93,13 @@ public class SmapiController : ControllerBase
                     var index = int.Parse(GetElementValue(doc, "index", nsmgr) ?? "0");
                     var count = int.Parse(GetElementValue(doc, "count", nsmgr) ?? "100");
                     var recursive = bool.Parse(GetElementValue(doc, "recursive", nsmgr) ?? "false");
-                    var metadataResult = _sonosService.GetMetadata(id, index, count, recursive);
+                    var metadataResult = _sonosService.GetMetadata(id, index, count, recursive, authToken);
                     response = BuildSoapResponse("getMetadataResponse", SerializeGetMetadata(metadataResult));
                     break;
 
                 case "getMediaMetadata":
                     var trackId = GetElementValue(doc, "id", nsmgr);
-                    var mediaMetadataResult = _sonosService.GetMediaMetadata(trackId);
+                    var mediaMetadataResult = _sonosService.GetMediaMetadata(trackId, authToken);
                     response = BuildSoapResponse("getMediaMetadataResponse", SerializeMediaMetadata(mediaMetadataResult));
                     break;
 
@@ -111,7 +114,7 @@ public class SmapiController : ControllerBase
                     var term = GetElementValue(doc, "term", nsmgr);
                     var searchIndex = int.Parse(GetElementValue(doc, "index", nsmgr) ?? "0");
                     var searchCount = int.Parse(GetElementValue(doc, "count", nsmgr) ?? "100");
-                    var searchResult = _sonosService.Search(searchId, term, searchIndex, searchCount);
+                    var searchResult = _sonosService.Search(searchId, term, searchIndex, searchCount, authToken);
                     response = BuildSoapResponse("searchResponse", SerializeSearch(searchResult));
                     break;
 
@@ -140,6 +143,29 @@ public class SmapiController : ControllerBase
     {
         var node = doc.SelectSingleNode($"//ns:{elementName}", nsmgr);
         return node?.InnerText ?? string.Empty;
+    }
+
+    private static string? ExtractAuthToken(XmlDocument doc, XmlNamespaceManager nsmgr)
+    {
+        // Try to extract credentials from SOAP header
+        var headerNode = doc.SelectSingleNode("//soap:Header", nsmgr);
+        if (headerNode == null)
+        {
+            return null;
+        }
+
+        nsmgr.AddNamespace("cred", "http://www.sonos.com/Services/1.1");
+        
+        // Look for credentials/loginToken/token
+        var tokenNode = headerNode.SelectSingleNode("//cred:credentials/cred:loginToken/cred:token", nsmgr);
+        if (tokenNode != null)
+        {
+            return tokenNode.InnerText;
+        }
+
+        // Alternative: look for authToken directly
+        tokenNode = headerNode.SelectSingleNode("//cred:authToken", nsmgr);
+        return tokenNode?.InnerText;
     }
 
     private static string BuildSoapResponse(string methodName, string body)

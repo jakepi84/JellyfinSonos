@@ -1,9 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.JellyfinSonos.Configuration;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using Microsoft.Extensions.Logging;
 
@@ -16,6 +21,7 @@ public class SonosService : ISonosService
 {
     private readonly JellyfinMusicService _musicService;
     private readonly LinkCodeService _linkCodeService;
+    private readonly IUserManager _userManager;
     private readonly ILogger<SonosService> _logger;
     private readonly PluginConfiguration _config;
 
@@ -24,16 +30,44 @@ public class SonosService : ISonosService
     /// </summary>
     /// <param name="musicService">Music service.</param>
     /// <param name="linkCodeService">Link code service.</param>
+    /// <param name="userManager">User manager.</param>
     /// <param name="logger">Logger.</param>
     public SonosService(
         JellyfinMusicService musicService,
         LinkCodeService linkCodeService,
+        IUserManager userManager,
         ILogger<SonosService> logger)
     {
         _musicService = musicService;
         _linkCodeService = linkCodeService;
+        _userManager = userManager;
         _logger = logger;
         _config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+    }
+
+    /// <summary>
+    /// Extracts user ID from auth token.
+    /// </summary>
+    /// <param name="authToken">Auth token.</param>
+    /// <returns>User ID or null.</returns>
+    private Guid? GetUserIdFromToken(string authToken)
+    {
+        try
+        {
+            var credentials = DecryptAuthToken(authToken);
+            if (credentials == null)
+            {
+                return null;
+            }
+
+            var user = _userManager.GetUserByName(credentials.Value.Username);
+            return user?.Id;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error extracting user from token");
+            return null;
+        }
     }
 
     /// <inheritdoc />
@@ -83,19 +117,28 @@ public class SonosService : ISonosService
     /// <inheritdoc />
     public GetMetadataResponse GetMetadata(string id, int index, int count, bool recursive)
     {
+        // This method is called without auth context - return root only
+        return GetMetadata(id, index, count, recursive, null);
+    }
+
+    /// <summary>
+    /// Gets metadata with auth token.
+    /// </summary>
+    /// <param name="id">Item ID.</param>
+    /// <param name="index">Start index.</param>
+    /// <param name="count">Number of items to return.</param>
+    /// <param name="recursive">Whether to recurse.</param>
+    /// <param name="authToken">Optional auth token for user context.</param>
+    /// <returns>Metadata result.</returns>
+    public GetMetadataResponse GetMetadata(string id, int index, int count, bool recursive, string? authToken)
+    {
         try
         {
-            // Parse the ID to determine what to return
-            // NOTE: This is a simplified implementation showing the basic structure
-            // For production use, this method should:
-            // 1. Extract user context from SOAP credentials header
-            // 2. Make async calls to JellyfinMusicService
-            // 3. Map Jellyfin entities to SMAPI format
-            // 4. Handle pagination properly
-            
+            _logger.LogDebug("GetMetadata called for id: {Id}, index: {Index}, count: {Count}", id, index, count);
+
+            // Return root categories if no ID specified
             if (string.IsNullOrEmpty(id) || id == "root")
             {
-                // Return root categories
                 return new GetMetadataResponse
                 {
                     Index = 0,
@@ -128,25 +171,43 @@ public class SonosService : ISonosService
                 };
             }
 
+            // Get user ID from auth token
+            var userId = GetUserIdFromToken(authToken ?? string.Empty);
+            if (!userId.HasValue)
+            {
+                _logger.LogWarning("No valid user context for GetMetadata");
+                return new GetMetadataResponse { Index = 0, Count = 0, Total = 0 };
+            }
+
+            // Parse the ID to determine what to return
             var parts = id.Split(':');
             var type = parts[0];
-            
-            // TODO: Implement full metadata retrieval based on ID type:
-            // - "artists" -> List all artists using _musicService.GetArtists()
-            // - "albums" -> List all albums using _musicService.GetAlbums()
-            // - "artist:guid" -> List albums for artist using _musicService.GetAlbumsByArtist()
-            // - "album:guid" -> List tracks for album using _musicService.GetTracksByAlbum()
-            // Map results to MediaCollection or MediaMetadata as appropriate
-            
-            _logger.LogDebug("GetMetadata called for id: {Id}, type: {Type}", id, type);
-            
-            return new GetMetadataResponse
+
+            switch (type)
             {
-                Index = 0,
-                Count = 0,
-                Total = 0,
-                MediaCollection = new List<MediaCollection>()
-            };
+                case "artists":
+                    return GetArtists(userId.Value, index, count).Result;
+
+                case "albums":
+                    return GetAllAlbums(userId.Value, index, count).Result;
+
+                case "artist":
+                    if (parts.Length > 1 && Guid.TryParse(parts[1], out var artistId))
+                    {
+                        return GetAlbumsByArtist(userId.Value, artistId, index, count).Result;
+                    }
+                    break;
+
+                case "album":
+                    if (parts.Length > 1 && Guid.TryParse(parts[1], out var albumId))
+                    {
+                        return GetTracksByAlbum(userId.Value, albumId).Result;
+                    }
+                    break;
+            }
+
+            _logger.LogWarning("Unknown metadata type: {Type}", type);
+            return new GetMetadataResponse { Index = 0, Count = 0, Total = 0 };
         }
         catch (Exception ex)
         {
@@ -155,20 +216,177 @@ public class SonosService : ISonosService
         }
     }
 
+    private async Task<GetMetadataResponse> GetArtists(Guid userId, int startIndex, int count)
+    {
+        var result = await _musicService.GetArtists(userId, startIndex, count);
+        var baseUrl = _config.ExternalUrl;
+
+        return new GetMetadataResponse
+        {
+            Index = startIndex,
+            Count = result.Items.Count,
+            Total = result.TotalCount,
+            MediaCollection = result.Items.Select(artist => new MediaCollection
+            {
+                Id = $"artist:{artist.Id}",
+                Title = artist.Name,
+                ItemType = "artist",
+                AlbumArtURI = GetImageUrl(baseUrl, artist.Id),
+                CanPlay = false
+            }).ToList()
+        };
+    }
+
+    private async Task<GetMetadataResponse> GetAllAlbums(Guid userId, int startIndex, int count)
+    {
+        var result = await _musicService.GetAlbums(userId, startIndex, count);
+        var baseUrl = _config.ExternalUrl;
+
+        return new GetMetadataResponse
+        {
+            Index = startIndex,
+            Count = result.Items.Count,
+            Total = result.TotalCount,
+            MediaCollection = result.Items.Select(album => new MediaCollection
+            {
+                Id = $"album:{album.Id}",
+                Title = album.Name,
+                ItemType = "album",
+                Artist = album.AlbumArtist,
+                AlbumArtURI = GetImageUrl(baseUrl, album.Id),
+                CanPlay = true
+            }).ToList()
+        };
+    }
+
+    private async Task<GetMetadataResponse> GetAlbumsByArtist(Guid userId, Guid artistId, int startIndex, int count)
+    {
+        var result = await _musicService.GetAlbumsByArtist(userId, artistId, startIndex, count);
+        var baseUrl = _config.ExternalUrl;
+
+        return new GetMetadataResponse
+        {
+            Index = startIndex,
+            Count = result.Items.Count,
+            Total = result.TotalCount,
+            MediaCollection = result.Items.Select(album => new MediaCollection
+            {
+                Id = $"album:{album.Id}",
+                Title = album.Name,
+                ItemType = "album",
+                Artist = album.AlbumArtist,
+                AlbumArtURI = GetImageUrl(baseUrl, album.Id),
+                CanPlay = true
+            }).ToList()
+        };
+    }
+
+    private async Task<GetMetadataResponse> GetTracksByAlbum(Guid userId, Guid albumId)
+    {
+        var tracks = await _musicService.GetTracksByAlbum(userId, albumId);
+        var baseUrl = _config.ExternalUrl;
+
+        return new GetMetadataResponse
+        {
+            Index = 0,
+            Count = tracks.Count,
+            Total = tracks.Count,
+            MediaMetadata = tracks.Select(track => new MediaMetadata
+            {
+                Id = $"track:{track.Id}",
+                Title = track.Name,
+                ItemType = "track",
+                MimeType = GetMimeType(track.Path),
+                TrackNumber = track.IndexNumber,
+                Artist = track.AlbumArtists?.FirstOrDefault(),
+                Album = track.Album,
+                AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
+                Duration = (int?)track.RunTimeTicks / 10000000, // Convert to seconds
+                CanPlay = true
+            }).ToList()
+        };
+    }
+
+    private string GetImageUrl(string baseUrl, Guid itemId)
+    {
+        return $"{baseUrl}/Items/{itemId}/Images/Primary?maxWidth=300";
+    }
+
+    private string GetMimeType(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return "audio/mpeg";
+        }
+
+        var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+        return ext switch
+        {
+            ".mp3" => "audio/mpeg",
+            ".flac" => "audio/flac",
+            ".m4a" => "audio/mp4",
+            ".aac" => "audio/aac",
+            ".ogg" => "audio/ogg",
+            ".wav" => "audio/wav",
+            _ => "audio/mpeg"
+        };
+    }
+
     /// <inheritdoc />
     public GetMediaMetadataResponse GetMediaMetadata(string id)
     {
+        return GetMediaMetadata(id, null);
+    }
+
+    /// <summary>
+    /// Gets media metadata with auth token.
+    /// </summary>
+    /// <param name="id">Track ID.</param>
+    /// <param name="authToken">Optional auth token.</param>
+    /// <returns>Media metadata.</returns>
+    public GetMediaMetadataResponse GetMediaMetadata(string id, string? authToken)
+    {
         try
         {
-            // Parse ID and return track metadata
-            // This is a simplified implementation
+            var parts = id.Split(':');
+            if (parts.Length < 2 || parts[0] != "track")
+            {
+                throw new Exception("Invalid track ID");
+            }
+
+            var userId = GetUserIdFromToken(authToken ?? string.Empty);
+            if (!userId.HasValue)
+            {
+                _logger.LogWarning("No valid user context for GetMediaMetadata");
+                return new GetMediaMetadataResponse();
+            }
+
+            if (!Guid.TryParse(parts[1], out var trackId))
+            {
+                throw new Exception("Invalid track GUID");
+            }
+
+            var track = _musicService.GetItem(userId.Value, trackId).Result as Audio;
+            if (track == null)
+            {
+                return new GetMediaMetadataResponse();
+            }
+
+            var baseUrl = _config.ExternalUrl;
+
             return new GetMediaMetadataResponse
             {
                 MediaMetadata = new MediaMetadata
                 {
                     Id = id,
-                    Title = "Track",
+                    Title = track.Name,
                     ItemType = "track",
+                    MimeType = GetMimeType(track.Path),
+                    TrackNumber = track.IndexNumber,
+                    Artist = track.AlbumArtists?.FirstOrDefault(),
+                    Album = track.Album,
+                    AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
+                    Duration = (int?)track.RunTimeTicks / 10000000,
                     CanPlay = true
                 }
             };
@@ -210,16 +428,94 @@ public class SonosService : ISonosService
     /// <inheritdoc />
     public SearchResponse Search(string id, string term, int index, int count)
     {
+        return Search(id, term, index, count, null);
+    }
+
+    /// <summary>
+    /// Search with auth token.
+    /// </summary>
+    /// <param name="id">Search category ID.</param>
+    /// <param name="term">Search term.</param>
+    /// <param name="index">Start index.</param>
+    /// <param name="count">Number of items.</param>
+    /// <param name="authToken">Optional auth token.</param>
+    /// <returns>Search results.</returns>
+    public SearchResponse Search(string id, string term, int index, int count, string? authToken)
+    {
         try
         {
-            // Search implementation
-            return new SearchResponse
+            _logger.LogDebug("Search called: id={Id}, term={Term}", id, term);
+
+            var userId = GetUserIdFromToken(authToken ?? string.Empty);
+            if (!userId.HasValue)
             {
-                Index = 0,
-                Count = 0,
-                Total = 0,
-                MediaCollection = new List<MediaCollection>()
-            };
+                _logger.LogWarning("No valid user context for Search");
+                return new SearchResponse { Index = 0, Count = 0, Total = 0 };
+            }
+
+            var baseUrl = _config.ExternalUrl;
+
+            switch (id)
+            {
+                case "artists":
+                    var artists = _musicService.Search(userId.Value, term, new[] { BaseItemKind.MusicArtist }, count).Result;
+                    return new SearchResponse
+                    {
+                        Index = 0,
+                        Count = artists.Count,
+                        Total = artists.Count,
+                        MediaCollection = artists.Cast<MusicArtist>().Select(artist => new MediaCollection
+                        {
+                            Id = $"artist:{artist.Id}",
+                            Title = artist.Name,
+                            ItemType = "artist",
+                            AlbumArtURI = GetImageUrl(baseUrl, artist.Id),
+                            CanPlay = false
+                        }).ToList()
+                    };
+
+                case "albums":
+                    var albums = _musicService.Search(userId.Value, term, new[] { BaseItemKind.MusicAlbum }, count).Result;
+                    return new SearchResponse
+                    {
+                        Index = 0,
+                        Count = albums.Count,
+                        Total = albums.Count,
+                        MediaCollection = albums.Cast<MusicAlbum>().Select(album => new MediaCollection
+                        {
+                            Id = $"album:{album.Id}",
+                            Title = album.Name,
+                            ItemType = "album",
+                            Artist = album.AlbumArtist,
+                            AlbumArtURI = GetImageUrl(baseUrl, album.Id),
+                            CanPlay = true
+                        }).ToList()
+                    };
+
+                case "tracks":
+                    var tracks = _musicService.Search(userId.Value, term, new[] { BaseItemKind.Audio }, count).Result;
+                    return new SearchResponse
+                    {
+                        Index = 0,
+                        Count = tracks.Count,
+                        Total = tracks.Count,
+                        MediaMetadata = tracks.Cast<Audio>().Select(track => new MediaMetadata
+                        {
+                            Id = $"track:{track.Id}",
+                            Title = track.Name,
+                            ItemType = "track",
+                            MimeType = GetMimeType(track.Path),
+                            Artist = track.AlbumArtists?.FirstOrDefault(),
+                            Album = track.Album,
+                            AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
+                            CanPlay = true
+                        }).ToList()
+                    };
+
+                default:
+                    _logger.LogWarning("Unknown search type: {Id}", id);
+                    return new SearchResponse { Index = 0, Count = 0, Total = 0 };
+            }
         }
         catch (Exception ex)
         {
