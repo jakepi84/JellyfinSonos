@@ -1,0 +1,99 @@
+name: Build Plugin
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+    
+    - name: Restore dependencies
+      run: dotnet restore
+    
+    - name: Build
+      run: dotnet build --configuration Release --no-restore
+    
+    - name: Get version
+      id: get_version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/v* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/v}
+        else
+          VERSION="1.0.0.0"
+        fi
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building version $VERSION"
+    
+    - name: Create plugin directory
+      run: |
+        mkdir -p artifacts/JellyfinSonos
+        cp Jellyfin.Plugin.JellyfinSonos/bin/Release/net9.0/Jellyfin.Plugin.JellyfinSonos.dll artifacts/JellyfinSonos/
+    
+    - name: Create manifest.json
+      run: |
+        cat > artifacts/manifest.json << EOF
+        [
+          {
+            "guid": "a8c8f6d4-3b2e-4f1a-9c7d-8e5f6a7b8c9d",
+            "name": "Jellyfin Sonos",
+            "description": "Integrates Jellyfin with Sonos speakers using SMAPI protocol. Allows your Jellyfin music library to appear as a music source in the Sonos app.",
+            "overview": "Play your Jellyfin music on Sonos speakers",
+            "owner": "jakepi84",
+            "category": "Music",
+            "version": "${{ steps.get_version.outputs.VERSION }}",
+            "changelog": "See GitHub releases for changelog",
+            "targetAbi": "10.10.0.0",
+            "sourceUrl": "https://github.com/jakepi84/JellyfinSonos",
+            "checksum": "",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "versions": [
+              {
+                "version": "${{ steps.get_version.outputs.VERSION }}",
+                "changelog": "See GitHub releases",
+                "targetAbi": "10.10.0.0",
+                "sourceUrl": "https://github.com/jakepi84/JellyfinSonos/releases/download/v${{ steps.get_version.outputs.VERSION }}/jellyfin-sonos_${{ steps.get_version.outputs.VERSION }}.zip",
+                "checksum": "",
+                "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              }
+            ]
+          }
+        ]
+        EOF
+    
+    - name: Create release package
+      run: |
+        cd artifacts
+        zip -r jellyfin-sonos_${{ steps.get_version.outputs.VERSION }}.zip JellyfinSonos/
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: jellyfin-sonos-${{ steps.get_version.outputs.VERSION }}
+        path: |
+          artifacts/jellyfin-sonos_${{ steps.get_version.outputs.VERSION }}.zip
+          artifacts/manifest.json
+    
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/jellyfin-sonos_${{ steps.get_version.outputs.VERSION }}.zip
+          artifacts/manifest.json
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
