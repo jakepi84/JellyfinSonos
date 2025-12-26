@@ -86,6 +86,13 @@ public class SonosService : ISonosService
         try
         {
             // Parse the ID to determine what to return
+            // NOTE: This is a simplified implementation showing the basic structure
+            // For production use, this method should:
+            // 1. Extract user context from SOAP credentials header
+            // 2. Make async calls to JellyfinMusicService
+            // 3. Map Jellyfin entities to SMAPI format
+            // 4. Handle pagination properly
+            
             if (string.IsNullOrEmpty(id) || id == "root")
             {
                 // Return root categories
@@ -124,9 +131,14 @@ public class SonosService : ISonosService
             var parts = id.Split(':');
             var type = parts[0];
             
-            // This is a simplified implementation
-            // In a real implementation, you'd need to extract user ID from credentials
-            // and make async calls to the music service
+            // TODO: Implement full metadata retrieval based on ID type:
+            // - "artists" -> List all artists using _musicService.GetArtists()
+            // - "albums" -> List all albums using _musicService.GetAlbums()
+            // - "artist:guid" -> List albums for artist using _musicService.GetAlbumsByArtist()
+            // - "album:guid" -> List tracks for album using _musicService.GetTracksByAlbum()
+            // Map results to MediaCollection or MediaMetadata as appropriate
+            
+            _logger.LogDebug("GetMetadata called for id: {Id}, type: {Type}", id, type);
             
             return new GetMetadataResponse
             {

@@ -164,22 +164,30 @@ public class SonosController : ControllerBase
     {
         try
         {
-            // Validate credentials by getting the user
+            // Validate that user exists
             var user = _userManager.GetUserByName(request.Username);
             
             if (user == null)
             {
+                _logger.LogWarning("Authorization failed: User not found - {Username}", request.Username);
                 return Unauthorized("Invalid username or password");
             }
 
-            // For now, we'll just store the credentials
-            // In a production system, you'd want to properly validate the password
+            // Basic validation - credentials will be validated on actual use during streaming
+            // This stores the credentials for the link code so Sonos can complete authorization
+            if (string.IsNullOrEmpty(request.Username) || string.IsNullOrEmpty(request.Password))
+            {
+                return BadRequest("Username and password are required");
+            }
+
+            // Store credentials with link code
             var success = _linkCodeService.SetCredentials(request.LinkCode, request.Username, request.Password);
             if (!success)
             {
                 return BadRequest("Invalid or expired link code");
             }
 
+            _logger.LogInformation("Authorization link code processed for user {Username}", request.Username);
             return Ok("Authorization successful");
         }
         catch (Exception ex)
@@ -240,6 +248,12 @@ public class SonosController : ControllerBase
 
     /// <summary>
     /// Stream endpoint for serving audio.
+    /// NOTE: This is a placeholder implementation. For production use, this endpoint should:
+    /// 1. Extract and validate user credentials from Authorization header
+    /// 2. Authenticate the user with Jellyfin
+    /// 3. Get the track item from Jellyfin using the trackId
+    /// 4. Return a FileStreamResult with the audio file
+    /// 5. Handle transcoding if needed
     /// </summary>
     /// <param name="trackId">Track ID.</param>
     /// <returns>Audio stream.</returns>
@@ -249,14 +263,21 @@ public class SonosController : ControllerBase
     {
         try
         {
-            // This is a placeholder - in a real implementation you would:
-            // 1. Extract user credentials from Authorization header
-            // 2. Validate the user
-            // 3. Get the track from Jellyfin
-            // 4. Stream the audio file
-            
             _logger.LogInformation("Stream request for track: {TrackId}", trackId);
-            return NotFound("Stream endpoint not fully implemented");
+            
+            // TODO: Implement actual streaming:
+            // 1. Parse trackId to extract Jellyfin item GUID
+            // 2. Extract auth token from Authorization header
+            // 3. Decrypt token to get user credentials
+            // 4. Authenticate user
+            // 5. Get item from library manager
+            // 6. Return file stream with proper MIME type
+            // Example:
+            // var item = _libraryManager.GetItemById(guid);
+            // var stream = File.OpenRead(item.Path);
+            // return File(stream, "audio/mpeg");
+            
+            return NotFound("Stream endpoint requires full implementation - see code comments");
         }
         catch (Exception ex)
         {

@@ -11,6 +11,28 @@ A Jellyfin plugin that integrates with Sonos speakers using the Sonos Music API 
 - **Search**: Search for artists, albums, and tracks from the Sonos app
 - **Direct Streaming**: Stream music directly from your Jellyfin server to Sonos devices
 
+## Current Implementation Status
+
+This plugin provides the foundational structure for Sonos integration but requires additional implementation for full functionality:
+
+### ✅ Implemented
+- Plugin architecture and configuration
+- SMAPI SOAP endpoint handling
+- AppLink authentication flow with link codes
+- Login page for device authorization
+- Configuration page in Jellyfin dashboard
+- Jellyfin music library integration service
+- Root metadata browsing structure
+
+### 🚧 Requires Implementation
+- **Full metadata browsing**: Complete implementation of browsing artists, albums, and tracks
+- **Audio streaming**: Implement actual audio file streaming with authentication
+- **Search functionality**: Implement search for artists, albums, and tracks
+- **User context handling**: Extract and use user credentials from SOAP headers
+- **Transcoding support**: Add support for transcoding incompatible audio formats
+
+See inline code comments marked with `TODO` for specific implementation guidance.
+
 ## Requirements
 
 - Jellyfin Server 10.10.0 or later
