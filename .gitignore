@@ -31,3 +31,6 @@ packages/
 *.swp
 *~
 .DS_Store
+
+# Build artifacts
+artifacts/
