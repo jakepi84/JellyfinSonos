@@ -1,0 +1,59 @@
+<svg width="400" height="400" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f1220"/>
+      <stop offset="100%" stop-color="#1a1f36"/>
+    </linearGradient>
+
+    <linearGradient id="serverGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5fa8ff"/>
+      <stop offset="100%" stop-color="#7b6cff"/>
+    </linearGradient>
+
+    <linearGradient id="speakerGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#9b7bff"/>
+      <stop offset="100%" stop-color="#6a5cff"/>
+    </linearGradient>
+
+    <linearGradient id="waveGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#5fdcff"/>
+      <stop offset="100%" stop-color="#b084ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="400" height="400" rx="0" fill="url(#bg)"/>
+
+  <!-- Server -->
+  <g transform="translate(70 170)">
+    <rect x="0" y="0" rx="14" ry="14" width="110" height="38" fill="url(#serverGrad)"/>
+    <rect x="0" y="46" rx="14" ry="14" width="110" height="38" fill="url(#serverGrad)"/>
+
+    <!-- Status lights -->
+    <circle cx="18" cy="19" r="5" fill="#7CFFB2"/>
+    <circle cx="18" cy="65" r="5" fill="#FF7CCB"/>
+    <circle cx="92" cy="65" r="5" fill="#FFD27C"/>
+  </g>
+
+  <!-- Sound Waves -->
+  <g fill="none" stroke="url(#waveGrad)" stroke-linecap="round">
+    <path d="M185 195 C210 180, 235 180, 260 195" stroke-width="8"/>
+    <path d="M185 215 C215 200, 245 200, 275 215" stroke-width="6"/>
+  </g>
+
+  <!-- Music Note -->
+  <g transform="translate(250 155)">
+    <circle cx="0" cy="22" r="8" fill="#FF8FB1"/>
+    <rect x="5" y="0" width="6" height="22" rx="3" fill="#FF8FB1"/>
+    <rect x="5" y="0" width="16" height="6" rx="3" fill="#FF8FB1"/>
+  </g>
+
+  <!-- Speaker -->
+  <g transform="translate(280 160)">
+    <rect x="0" y="0" width="90" height="120" rx="18" fill="url(#speakerGrad)"/>
+    <circle cx="45" cy="65" r="26" fill="#2b2f55"/>
+    <circle cx="45" cy="65" r="16" fill="#b9a7ff"/>
+    <circle cx="45" cy="28" r="6" fill="#d6ccff"/>
+  </g>
+</svg>

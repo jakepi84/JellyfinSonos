@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
@@ -58,8 +59,8 @@ public class SmapiController : ControllerBase
             nsmgr.AddNamespace("soap", "http://schemas.xmlsoap.org/soap/envelope/");
             nsmgr.AddNamespace("ns", "http://www.sonos.com/Services/1.1");
 
-            // Extract auth token from SOAP headers
-            var authToken = ExtractAuthToken(doc, nsmgr);
+            // Prefer HTTP Authorization bearer over SOAP headers for OAuth flows
+            var authToken = ExtractBearerToken() ?? ExtractAuthToken(doc, nsmgr);
 
             // Extract the method name
             var bodyNode = doc.SelectSingleNode("//soap:Body", nsmgr);
@@ -81,11 +82,7 @@ public class SmapiController : ControllerBase
                     break;
 
                 case "getDeviceAuthToken":
-                    var linkCode = GetElementValue(doc, "linkCode", nsmgr);
-                    var linkDeviceId = GetElementValue(doc, "linkDeviceId", nsmgr);
-                    var householdId2 = GetElementValue(doc, "householdId", nsmgr);
-                    var authTokenResult = _sonosService.GetDeviceAuthToken(householdId2, linkCode, linkDeviceId);
-                    response = BuildSoapResponse("getDeviceAuthTokenResponse", SerializeGetDeviceAuthToken(authTokenResult));
+                    response = BuildSoapFault("Client", "OAuth is used for this service. Tokens are issued via /sonos/oauth/token.");
                     break;
 
                 case "getMetadata":
@@ -105,7 +102,7 @@ public class SmapiController : ControllerBase
 
                 case "getMediaURI":
                     var mediaId = GetElementValue(doc, "id", nsmgr);
-                    var uriResult = _sonosService.GetMediaURI(mediaId);
+                    var uriResult = _sonosService.GetMediaURI(mediaId, authToken);
                     response = BuildSoapResponse("getMediaURIResponse", SerializeMediaURI(uriResult));
                     break;
 
@@ -168,6 +165,25 @@ public class SmapiController : ControllerBase
         return tokenNode?.InnerText;
     }
 
+    private string? ExtractBearerToken()
+    {
+        if (!Request.Headers.TryGetValue("Authorization", out var values))
+        {
+            return null;
+        }
+
+        var header = values.FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return null;
+        }
+
+        const string bearerPrefix = "Bearer ";
+        return header.StartsWith(bearerPrefix, StringComparison.OrdinalIgnoreCase)
+            ? header.Substring(bearerPrefix.Length).Trim()
+            : null;
+    }
+
     private static string BuildSoapResponse(string methodName, string body)
     {
         return $@"<?xml version=""1.0"" encoding=""utf-8""?>
@@ -191,31 +207,6 @@ public class SmapiController : ControllerBase
         </soap:Fault>
     </soap:Body>
 </soap:Envelope>";
-    }
-
-    private static string SerializeGetAppLink(GetAppLinkResponse response)
-    {
-        return $@"<ns:getAppLinkResult>
-            <ns:authorizeAccount>
-                <ns:appUrlStringId>{response.AuthorizeAccount?.AppUrlStringId}</ns:appUrlStringId>
-                <ns:deviceLink>
-                    <ns:regUrl>{System.Security.SecurityElement.Escape(response.AuthorizeAccount?.DeviceLink?.RegUrl ?? string.Empty)}</ns:regUrl>
-                    <ns:linkCode>{response.AuthorizeAccount?.DeviceLink?.LinkCode}</ns:linkCode>
-                    <ns:showLinkCode>{response.AuthorizeAccount?.DeviceLink?.ShowLinkCode.ToString().ToLower()}</ns:showLinkCode>
-                </ns:deviceLink>
-            </ns:authorizeAccount>
-        </ns:getAppLinkResult>";
-    }
-
-    private static string SerializeGetDeviceAuthToken(GetDeviceAuthTokenResponse response)
-    {
-        return $@"<ns:getDeviceAuthTokenResult>
-            <ns:authToken>{response.AuthToken}</ns:authToken>
-            <ns:privateKey>{response.PrivateKey}</ns:privateKey>
-            <ns:userInfo>
-                <ns:nickname>{System.Security.SecurityElement.Escape(response.UserInfo?.Nickname ?? string.Empty)}</ns:nickname>
-            </ns:userInfo>
-        </ns:getDeviceAuthTokenResult>";
     }
 
     private static string SerializeGetMetadata(GetMetadataResponse response)
@@ -271,9 +262,39 @@ public class SmapiController : ControllerBase
 
     private static string SerializeMediaURI(GetMediaURIResponse response)
     {
-        return $@"<ns:getMediaURIResult>
-            <ns:mediaUri>{System.Security.SecurityElement.Escape(response.MediaUri ?? string.Empty)}</ns:mediaUri>
-        </ns:getMediaURIResult>";
+        var sb = new StringBuilder();
+        sb.AppendLine("<ns:getMediaURIResult>");
+        sb.AppendLine($"    <ns:mediaUri>{System.Security.SecurityElement.Escape(response.MediaUri ?? string.Empty)}</ns:mediaUri>");
+
+        if (response.HttpHeaders != null && response.HttpHeaders.Any())
+        {
+            sb.AppendLine("    <ns:httpHeaders>");
+            foreach (var header in response.HttpHeaders)
+            {
+                sb.AppendLine("        <ns:httpHeader>");
+                sb.AppendLine($"            <ns:header>{System.Security.SecurityElement.Escape(header.Header)}</ns:header>");
+                sb.AppendLine($"            <ns:value>{System.Security.SecurityElement.Escape(header.Value)}</ns:value>");
+                sb.AppendLine("        </ns:httpHeader>");
+            }
+            sb.AppendLine("    </ns:httpHeaders>");
+        }
+
+        sb.AppendLine("</ns:getMediaURIResult>");
+        return sb.ToString();
+    }
+
+    private static string SerializeGetAppLink(GetAppLinkResponse response)
+    {
+        return $@"<ns:getAppLinkResult>
+            <ns:authorizeAccount>
+                <ns:appUrlStringId>{response.AuthorizeAccount?.AppUrlStringId}</ns:appUrlStringId>
+                <ns:deviceLink>
+                    <ns:regUrl>{System.Security.SecurityElement.Escape(response.AuthorizeAccount?.DeviceLink?.RegUrl ?? string.Empty)}</ns:regUrl>
+                    <ns:linkCode>{System.Security.SecurityElement.Escape(response.AuthorizeAccount?.DeviceLink?.LinkCode ?? string.Empty)}</ns:linkCode>
+                    <ns:showLinkCode>{response.AuthorizeAccount?.DeviceLink?.ShowLinkCode.ToString().ToLower()}</ns:showLinkCode>
+                </ns:deviceLink>
+            </ns:authorizeAccount>
+        </ns:getAppLinkResult>";
     }
 
     private static string SerializeSearch(SearchResponse response)

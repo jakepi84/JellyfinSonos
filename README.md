@@ -99,6 +99,7 @@ Fill in the following required fields:
 - **What**: A secure random string used for encrypting user credentials
 - **Length**: At least 32 characters recommended
 - **Important**: Keep this secret! Don't share it or commit it to version control
+- **Used for**: Signing OAuth access tokens and refresh tokens (no plaintext passwords are stored)
 
 **Generate a secure key:**
 
@@ -128,7 +129,7 @@ Click **Save** to store your settings. Note the SMAPI endpoint URL displayed on 
 Before registering:
 - ✅ Plugin installed and configured in Jellyfin
 - ✅ Jellyfin accessible via public HTTPS URL
-- ✅ Test accessibility: Open `https://your-server.com/sonos/strings.xml` in a browser (should show XML)
+- ✅ Test accessibility: Open `https://your-server.com/sonos/strings.xml` (XML) and `https://your-server.com/sonos/oauth/authorize?client_id=247&response_type=code&redirect_uri=https://example.com/callback` (login page)
 
 ### Registration Process
 
@@ -152,7 +153,10 @@ Before registering:
 | **Service ID** | Same as configured in plugin (e.g., 247) |
 | **Endpoint URL** | `https://your-server.com/sonos/smapi` |
 | **Polling Interval** | 30 seconds (default) |
-| **Authentication Method** | **AppLink** |
+| **Authentication Method** | **OAuth** |
+| **Authorization URL** | `https://your-server.com/sonos/oauth/authorize` |
+| **Token URL** | `https://your-server.com/sonos/oauth/token` |
+| **Refresh Token URL** | `https://your-server.com/sonos/oauth/token` (same endpoint) |
 | **Strings URL** | `https://your-server.com/sonos/strings.xml` |
 | **Presentation Map URL** | `https://your-server.com/sonos/presentationMap.xml` |
 | **Container Type** | Music Service |
@@ -259,13 +263,13 @@ Once your service is approved by Sonos:
 
 **Causes:**
 - Incorrect Jellyfin credentials
-- Link code expired (10 minute timeout)
+- Authorization code expired (10 minute timeout) or refresh token expired
 - External URL not accessible
 
 **Solutions:**
 1. Double-check your Jellyfin username and password
-2. Try authorization again (generates new link code)
-3. Test external URL: Open `https://your-server.com/sonos/login?linkCode=TEST123` in browser
+2. Try authorization again from the Sonos app (generates a new OAuth code)
+3. Test external URL: Open `https://your-server.com/sonos/oauth/authorize?client_id=247&response_type=code&redirect_uri=https://example.com/callback` in a browser
 4. Verify firewall allows HTTPS traffic to Jellyfin
 
 #### "Cannot Browse" or Empty Lists
@@ -409,14 +413,14 @@ The plugin streams audio files directly without transcoding. Sonos supports:
 This plugin implements:
 
 - **SMAPI SOAP Service**: Handles Sonos API requests for browsing and playback
-- **Authentication Flow**: Implements AppLink authentication for secure user authorization  
-- **REST API Endpoints**: Provides login, streaming, and configuration endpoints
+- **Authentication Flow**: OAuth 2.0 Authorization Code with refresh tokens (PKCE)
+- **REST API Endpoints**: Provides OAuth authorize/token, streaming, and configuration endpoints
 - **Jellyfin Integration**: Integrates with Jellyfin's library manager to access music content
 
 ### Key Endpoints
 
-- `/sonos/login` - Login page for device authorization
-- `/sonos/authorize` - POST endpoint for credential validation
+- `/sonos/oauth/authorize` - OAuth authorization page (Authorization Code + PKCE)
+- `/sonos/oauth/token` - OAuth token endpoint (authorization_code & refresh_token)
 - `/sonos/smapi` - SOAP endpoint for Sonos API calls (getMetadata, getMediaURI, search, etc.)
 - `/sonos/stream/{trackId}` - Audio streaming endpoint with range request support
 - `/sonos/strings.xml` - Localization strings for Sonos UI
@@ -426,7 +430,7 @@ This plugin implements:
 
 - **Language**: C# / .NET 9.0
 - **Plugin System**: Jellyfin Plugin Framework
-- **Authentication**: AES-256 encrypted tokens
+- **Authentication**: HMAC-signed OAuth access tokens (secret key configured in plugin)
 - **Streaming**: Direct file streaming with MIME type detection
 - **Protocol**: SOAP 1.1 via manual XML handling
 
@@ -483,7 +487,7 @@ Jellyfin.Plugin.JellyfinSonos/
 │   ├── ISonosService.cs        # SMAPI interface
 │   ├── SonosService.cs         # SMAPI implementation
 │   ├── JellyfinMusicService.cs # Jellyfin integration
-│   ├── LinkCodeService.cs      # Link code management
+│   ├── OAuthService.cs         # OAuth token + code helpers
 │   └── Sonoswsdl-*.wsdl        # Sonos WSDL specification
 └── Plugin.cs                    # Main plugin class
 ```

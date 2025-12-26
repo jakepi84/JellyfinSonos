@@ -6,6 +6,7 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.JellyfinSonos.Api;
@@ -17,42 +18,45 @@ namespace Jellyfin.Plugin.JellyfinSonos.Api;
 [Route("sonos")]
 public class SonosController : ControllerBase
 {
-    private readonly LinkCodeService _linkCodeService;
     private readonly IUserManager _userManager;
     private readonly ILibraryManager _libraryManager;
+    private readonly OAuthService _oauthService;
     private readonly ILogger<SonosController> _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SonosController"/> class.
     /// </summary>
-    /// <param name="linkCodeService">Link code service.</param>
+    /// <param name="oauthService">OAuth token service.</param>
     /// <param name="userManager">User manager.</param>
     /// <param name="libraryManager">Library manager.</param>
     /// <param name="logger">Logger.</param>
     public SonosController(
-        LinkCodeService linkCodeService,
         IUserManager userManager,
         ILibraryManager libraryManager,
+        OAuthService oauthService,
         ILogger<SonosController> logger)
     {
-        _linkCodeService = linkCodeService;
         _userManager = userManager;
         _libraryManager = libraryManager;
+        _oauthService = oauthService;
         _logger = logger;
     }
 
     /// <summary>
-    /// Login page for Sonos device authorization.
+    /// OAuth authorization endpoint (Authorization Code + optional PKCE).
     /// </summary>
-    /// <param name="linkCode">Link code from Sonos.</param>
-    /// <returns>Login page.</returns>
-    [HttpGet("login")]
+    [HttpGet("oauth/authorize")]
     [AllowAnonymous]
-    public IActionResult Login([FromQuery] string linkCode)
+    public IActionResult Authorize([FromQuery] OAuthAuthorizeQuery query)
     {
-        if (string.IsNullOrEmpty(linkCode))
+        if (!string.Equals(query.ResponseType, "code", StringComparison.OrdinalIgnoreCase))
         {
-            return BadRequest("Link code is required");
+            return BadRequest("response_type must be 'code'.");
+        }
+
+        if (string.IsNullOrWhiteSpace(query.ClientId) || string.IsNullOrWhiteSpace(query.RedirectUri))
+        {
+            return BadRequest("client_id and redirect_uri are required.");
         }
 
         var html = $@"<!DOCTYPE html>
@@ -68,9 +72,7 @@ public class SonosController : ControllerBase
             background-color: #0b0b0b;
             color: #ffffff;
         }}
-        h1 {{
-            color: #00a4dc;
-        }}
+        h1 {{ color: #00a4dc; }}
         form {{
             background: #1a1a1a;
             padding: 20px;
@@ -97,62 +99,26 @@ public class SonosController : ControllerBase
             cursor: pointer;
             font-size: 16px;
         }}
-        button:hover {{
-            background-color: #008abd;
-        }}
-        .message {{
-            padding: 10px;
-            margin: 10px 0;
-            border-radius: 3px;
-        }}
-        .success {{
-            background-color: #2d5016;
-            color: #90ee90;
-        }}
-        .error {{
-            background-color: #5c1a1a;
-            color: #ff6b6b;
-        }}
+        button:hover {{ background-color: #008abd; }}
+        .message {{ padding: 10px; margin: 10px 0; border-radius: 3px; }}
+        .error {{ background-color: #5c1a1a; color: #ff6b6b; }}
     </style>
 </head>
 <body>
     <h1>Jellyfin - Sonos Authorization</h1>
-    <p>Please enter your Jellyfin credentials to authorize Sonos access.</p>
-    <form id='loginForm'>
+    <p>Sign in to link Sonos with your Jellyfin account.</p>
+    <form method='post' action='/sonos/oauth/authorize'>
+        <input type='hidden' name='client_id' value='{System.Net.WebUtility.HtmlEncode(query.ClientId)}' />
+        <input type='hidden' name='redirect_uri' value='{System.Net.WebUtility.HtmlEncode(query.RedirectUri)}' />
+        <input type='hidden' name='state' value='{System.Net.WebUtility.HtmlEncode(query.State ?? string.Empty)}' />
+        <input type='hidden' name='scope' value='{System.Net.WebUtility.HtmlEncode(query.Scope ?? "smapi")}' />
+        <input type='hidden' name='response_type' value='code' />
+        <input type='hidden' name='code_challenge' value='{System.Net.WebUtility.HtmlEncode(query.CodeChallenge ?? string.Empty)}' />
+        <input type='hidden' name='code_challenge_method' value='{System.Net.WebUtility.HtmlEncode(query.CodeChallengeMethod ?? string.Empty)}' />
         <input type='text' id='username' name='username' placeholder='Username' required />
         <input type='password' id='password' name='password' placeholder='Password' required />
         <button type='submit'>Authorize</button>
     </form>
-    <div id='message'></div>
-    <script>
-        document.getElementById('loginForm').addEventListener('submit', async function(e) {{
-            e.preventDefault();
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            const linkCode = '{linkCode}';
-            
-            try {{
-                const response = await fetch('/sonos/authorize', {{
-                    method: 'POST',
-                    headers: {{
-                        'Content-Type': 'application/json'
-                    }},
-                    body: JSON.stringify({{ linkCode, username, password }})
-                }});
-                
-                const messageDiv = document.getElementById('message');
-                if (response.ok) {{
-                    messageDiv.innerHTML = '<div class=""message success"">Authorization successful! You can now close this window and return to your Sonos app.</div>';
-                    document.getElementById('loginForm').style.display = 'none';
-                }} else {{
-                    const error = await response.text();
-                    messageDiv.innerHTML = '<div class=""message error"">Error: ' + error + '</div>';
-                }}
-            }} catch (error) {{
-                document.getElementById('message').innerHTML = '<div class=""message error"">Error: ' + error + '</div>';
-            }}
-        }});
-    </script>
 </body>
 </html>";
 
@@ -160,47 +126,100 @@ public class SonosController : ControllerBase
     }
 
     /// <summary>
-    /// Authorize endpoint for storing credentials.
+    /// OAuth authorization form POST handler.
     /// </summary>
-    /// <param name="request">Authorization request.</param>
-    /// <returns>Result.</returns>
-    [HttpPost("authorize")]
+    [HttpPost("oauth/authorize")]
     [AllowAnonymous]
-    public async Task<IActionResult> Authorize([FromBody] AuthorizeRequest request)
+    public IActionResult AuthorizePost([FromForm] OAuthAuthorizeForm form)
     {
-        try
+        if (!string.Equals(form.ResponseType, "code", StringComparison.OrdinalIgnoreCase))
         {
-            // Validate that user exists
-            var user = _userManager.GetUserByName(request.Username);
-            
-            if (user == null)
-            {
-                _logger.LogWarning("Authorization failed: User not found - {Username}", request.Username);
-                return Unauthorized("Invalid username or password");
-            }
-
-            // Basic validation - credentials will be validated on actual use during streaming
-            // This stores the credentials for the link code so Sonos can complete authorization
-            if (string.IsNullOrEmpty(request.Username) || string.IsNullOrEmpty(request.Password))
-            {
-                return BadRequest("Username and password are required");
-            }
-
-            // Store credentials with link code
-            var success = _linkCodeService.SetCredentials(request.LinkCode, request.Username, request.Password);
-            if (!success)
-            {
-                return BadRequest("Invalid or expired link code");
-            }
-
-            _logger.LogInformation("Authorization link code processed for user {Username}", request.Username);
-            return Ok("Authorization successful");
+            return BadRequest("response_type must be 'code'.");
         }
-        catch (Exception ex)
+
+        if (string.IsNullOrWhiteSpace(form.ClientId) || string.IsNullOrWhiteSpace(form.RedirectUri))
         {
-            _logger.LogError(ex, "Error during authorization");
-            return StatusCode(500, "An error occurred during authorization");
+            return BadRequest("client_id and redirect_uri are required.");
         }
+
+        var user = _userManager.GetUserByName(form.Username);
+        if (user == null)
+        {
+            _logger.LogWarning("OAuth authorization failed: user not found {Username}", form.Username);
+            return Unauthorized("Invalid username or password.");
+        }
+
+        if (string.IsNullOrWhiteSpace(form.Password))
+        {
+            return BadRequest("Password is required.");
+        }
+
+        // NOTE: Jellyfin plugins do not currently expose a password verifier; we rely on the presence of the account and password being provided.
+        var code = _oauthService.CreateAuthorizationCode(user.Id, form.Username, form.ClientId, form.RedirectUri, form.CodeChallenge, form.CodeChallengeMethod);
+
+        var redirectUri = BuildRedirectUri(form.RedirectUri, code, form.State);
+        _logger.LogInformation("OAuth authorization code issued for user {Username}", form.Username);
+        return Redirect(redirectUri);
+    }
+
+    /// <summary>
+    /// OAuth token endpoint (authorization_code and refresh_token grants).
+    /// </summary>
+    [HttpPost("oauth/token")]
+    [AllowAnonymous]
+    [Consumes("application/x-www-form-urlencoded", "application/json")]
+    public IActionResult Token([FromForm] OAuthTokenRequest request)
+    {
+        var scope = string.IsNullOrWhiteSpace(request.Scope) ? "smapi" : request.Scope;
+
+        if (string.Equals(request.GrantType, "authorization_code", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(request.Code) || string.IsNullOrWhiteSpace(request.ClientId) || string.IsNullOrWhiteSpace(request.RedirectUri))
+            {
+                return BadRequest(new { error = "invalid_request", error_description = "code, client_id, and redirect_uri are required." });
+            }
+
+            if (!_oauthService.TryRedeemCode(request.Code, request.ClientId, request.RedirectUri, request.CodeVerifier, out var authCode) || authCode == null)
+            {
+                return Unauthorized(new { error = "invalid_grant", error_description = "Authorization code is invalid or expired." });
+            }
+
+            var accessToken = _oauthService.IssueAccessToken(authCode.UserId, authCode.Username, scope);
+            var refreshToken = _oauthService.IssueRefreshToken(authCode.UserId, authCode.Username, scope);
+
+            return Ok(new
+            {
+                token_type = "Bearer",
+                access_token = accessToken.Token,
+                expires_in = (int)(accessToken.ExpiresAt - DateTimeOffset.UtcNow).TotalSeconds,
+                refresh_token = refreshToken.Token,
+                scope = accessToken.Scope
+            });
+        }
+
+        if (string.Equals(request.GrantType, "refresh_token", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(request.RefreshToken))
+            {
+                return BadRequest(new { error = "invalid_request", error_description = "refresh_token is required." });
+            }
+
+            if (!_oauthService.TryExchangeRefreshToken(request.RefreshToken, out var accessToken, out var refreshToken))
+            {
+                return Unauthorized(new { error = "invalid_grant", error_description = "Refresh token is invalid or expired." });
+            }
+
+            return Ok(new
+            {
+                token_type = "Bearer",
+                access_token = accessToken.Token,
+                expires_in = (int)(accessToken.ExpiresAt - DateTimeOffset.UtcNow).TotalSeconds,
+                refresh_token = refreshToken.Token,
+                scope = accessToken.Scope
+            });
+        }
+
+        return BadRequest(new { error = "unsupported_grant_type", error_description = "Supported grant types: authorization_code, refresh_token." });
     }
 
     /// <summary>
@@ -265,6 +284,11 @@ public class SonosController : ControllerBase
         {
             _logger.LogInformation("Stream request for track: {TrackId}", trackId);
 
+            if (!TryValidateAccessToken(out var principal))
+            {
+                return Unauthorized("Valid access token required");
+            }
+
             // Parse track ID
             if (!Guid.TryParse(trackId, out var itemId))
             {
@@ -300,7 +324,7 @@ public class SonosController : ControllerBase
             var stream = new FileStream(audioItem.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
 
             // Return file stream
-            _logger.LogInformation("Streaming track: {TrackName} ({Path})", audioItem.Name, audioItem.Path);
+            _logger.LogInformation("Streaming track: {TrackName} ({Path}) for user {User}", audioItem.Name, audioItem.Path, principal.Username);
             return File(stream, mimeType, enableRangeProcessing: true);
         }
         catch (Exception ex)
@@ -330,25 +354,86 @@ public class SonosController : ControllerBase
             _ => "audio/mpeg"
         };
     }
+
+    private string BuildRedirectUri(string redirectUri, string code, string? state)
+    {
+        var uriWithCode = QueryHelpers.AddQueryString(redirectUri, "code", code);
+        return string.IsNullOrWhiteSpace(state)
+            ? uriWithCode
+            : QueryHelpers.AddQueryString(uriWithCode, "state", state);
+    }
+
+    private bool TryValidateAccessToken(out OAuthService.OAuthPrincipal principal)
+    {
+        principal = default!;
+
+        var token = ExtractAccessToken();
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return false;
+        }
+
+        return _oauthService.ValidateAccessToken(token, out principal);
+    }
+
+    private string? ExtractAccessToken()
+    {
+        // 1) Authorization header
+        if (Request.Headers.TryGetValue("Authorization", out var values))
+        {
+            var header = values.ToString();
+            const string bearer = "Bearer ";
+            if (header.StartsWith(bearer, StringComparison.OrdinalIgnoreCase))
+            {
+                return header.Substring(bearer.Length).Trim();
+            }
+        }
+
+        // 2) access_token query string (used by Sonos when invoking mediaUri)
+        if (Request.Query.TryGetValue("access_token", out var tokenValues))
+        {
+            return tokenValues.ToString();
+        }
+
+        return null;
+    }
+}
+
+#pragma warning disable CS1591 // DTOs are internal to the plugin API surface
+/// <summary>
+/// OAuth authorize query parameters.
+/// </summary>
+public class OAuthAuthorizeQuery
+{
+    public string ResponseType { get; set; } = "code";
+    public string ClientId { get; set; } = string.Empty;
+    public string RedirectUri { get; set; } = string.Empty;
+    public string? Scope { get; set; }
+    public string? State { get; set; }
+    public string? CodeChallenge { get; set; }
+    public string? CodeChallengeMethod { get; set; }
 }
 
 /// <summary>
-/// Authorization request model.
+/// OAuth authorize form body.
 /// </summary>
-public class AuthorizeRequest
+public class OAuthAuthorizeForm : OAuthAuthorizeQuery
 {
-    /// <summary>
-    /// Gets or sets the link code.
-    /// </summary>
-    public string LinkCode { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Gets or sets the username.
-    /// </summary>
     public string Username { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Gets or sets the password.
-    /// </summary>
     public string Password { get; set; } = string.Empty;
 }
+
+/// <summary>
+/// OAuth token exchange request body.
+/// </summary>
+public class OAuthTokenRequest
+{
+    public string GrantType { get; set; } = string.Empty;
+    public string? Code { get; set; }
+    public string? RedirectUri { get; set; }
+    public string? ClientId { get; set; }
+    public string? CodeVerifier { get; set; }
+    public string? RefreshToken { get; set; }
+    public string? Scope { get; set; }
+}
+#pragma warning restore CS1591

@@ -18,7 +18,7 @@ public class PluginConfiguration : BasePluginConfiguration
     public int ServiceId { get; set; } = 247;
 
     /// <summary>
-    /// Gets or sets the secret key for encrypting credentials.
+    /// Gets or sets the secret key for signing OAuth tokens.
     /// </summary>
     public string SecretKey { get; set; } = string.Empty;
 

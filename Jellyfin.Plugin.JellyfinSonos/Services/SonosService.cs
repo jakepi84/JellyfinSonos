@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
@@ -20,8 +19,8 @@ namespace Jellyfin.Plugin.JellyfinSonos.Services;
 public class SonosService : ISonosService
 {
     private readonly JellyfinMusicService _musicService;
-    private readonly LinkCodeService _linkCodeService;
     private readonly IUserManager _userManager;
+    private readonly OAuthService _oauthService;
     private readonly ILogger<SonosService> _logger;
     private readonly PluginConfiguration _config;
 
@@ -29,53 +28,31 @@ public class SonosService : ISonosService
     /// Initializes a new instance of the <see cref="SonosService"/> class.
     /// </summary>
     /// <param name="musicService">Music service.</param>
-    /// <param name="linkCodeService">Link code service.</param>
     /// <param name="userManager">User manager.</param>
+    /// <param name="oauthService">OAuth token service.</param>
     /// <param name="logger">Logger.</param>
     public SonosService(
         JellyfinMusicService musicService,
-        LinkCodeService linkCodeService,
         IUserManager userManager,
+        OAuthService oauthService,
         ILogger<SonosService> logger)
     {
         _musicService = musicService;
-        _linkCodeService = linkCodeService;
         _userManager = userManager;
+        _oauthService = oauthService;
         _logger = logger;
         _config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
-    }
-
-    /// <summary>
-    /// Extracts user ID from auth token.
-    /// </summary>
-    /// <param name="authToken">Auth token.</param>
-    /// <returns>User ID or null.</returns>
-    private Guid? GetUserIdFromToken(string authToken)
-    {
-        try
-        {
-            var credentials = DecryptAuthToken(authToken);
-            if (credentials == null)
-            {
-                return null;
-            }
-
-            var user = _userManager.GetUserByName(credentials.Value.Username);
-            return user?.Id;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error extracting user from token");
-            return null;
-        }
     }
 
     /// <inheritdoc />
     public GetAppLinkResponse GetAppLink(string householdId)
     {
-        var linkCode = _linkCodeService.GenerateLinkCode();
-        var baseUrl = _config.ExternalUrl;
+        var baseUrl = _config.ExternalUrl?.TrimEnd('/') ?? string.Empty;
+        var regUrl = string.IsNullOrWhiteSpace(baseUrl)
+            ? string.Empty
+            : $"{baseUrl}/sonos/oauth/authorize";
 
+        // Sonos still calls getAppLink even for OAuth; we return the authorize page URL and no link code.
         return new GetAppLinkResponse
         {
             AuthorizeAccount = new AuthorizeAccount
@@ -83,35 +60,36 @@ public class SonosService : ISonosService
                 AppUrlStringId = "AppLinkMessage",
                 DeviceLink = new DeviceLink
                 {
-                    RegUrl = $"{baseUrl}/sonos/login?linkCode={linkCode}",
-                    LinkCode = linkCode,
+                    RegUrl = regUrl,
+                    LinkCode = string.Empty,
                     ShowLinkCode = false
                 }
             }
         };
     }
 
-    /// <inheritdoc />
-    public GetDeviceAuthTokenResponse GetDeviceAuthToken(string householdId, string linkCode, string linkDeviceId)
+    /// <summary>
+    /// Extracts user ID from auth token.
+    /// </summary>
+    /// <param name="authToken">Auth token.</param>
+    /// <returns>User ID or null.</returns>
+    private Guid? GetUserIdFromToken(string? authToken)
     {
-        var credentials = _linkCodeService.GetCredentials(linkCode);
-        if (credentials == null)
+        try
         {
-            throw new Exception("Invalid or expired link code");
-        }
-
-        // Create auth token with username embedded
-        var token = CreateAuthToken(credentials.Value.Username, credentials.Value.Password);
-
-        return new GetDeviceAuthTokenResponse
-        {
-            AuthToken = token,
-            PrivateKey = "jellyfin",
-            UserInfo = new UserInfo
+            if (!_oauthService.ValidateAccessToken(authToken, out var principal))
             {
-                Nickname = credentials.Value.Username
+                return null;
             }
-        };
+
+            var user = _userManager.GetUserByName(principal.Username);
+            return user?.Id;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error extracting user from token");
+            return null;
+        }
     }
 
     /// <inheritdoc />
@@ -399,7 +377,7 @@ public class SonosService : ISonosService
     }
 
     /// <inheritdoc />
-    public GetMediaURIResponse GetMediaURI(string id)
+    public GetMediaURIResponse GetMediaURI(string id, string? authToken)
     {
         try
         {
@@ -415,7 +393,16 @@ public class SonosService : ISonosService
             return new GetMediaURIResponse
             {
                 MediaUri = $"{baseUrl}/sonos/stream/{trackId}",
-                HttpHeaders = new List<HttpHeader>()
+                HttpHeaders = string.IsNullOrWhiteSpace(authToken)
+                    ? new List<HttpHeader>()
+                    : new List<HttpHeader>
+                    {
+                        new HttpHeader
+                        {
+                            Header = "Authorization",
+                            Value = $"Bearer {authToken}"
+                        }
+                    }
             };
         }
         catch (Exception ex)
@@ -528,61 +515,5 @@ public class SonosService : ISonosService
     public void ReportAccountAction(string type)
     {
         _logger.LogInformation("Account action: {Type}", type);
-    }
-
-    private string CreateAuthToken(string username, string password)
-    {
-        // Create a simple token with username:password:timestamp
-        var data = $"{username}:{password}:{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
-        var key = Encoding.UTF8.GetBytes(_config.SecretKey.PadRight(32).Substring(0, 32));
-        
-        using var aes = Aes.Create();
-        aes.Key = key;
-        aes.GenerateIV();
-        
-        using var encryptor = aes.CreateEncryptor();
-        var plainBytes = Encoding.UTF8.GetBytes(data);
-        var encrypted = encryptor.TransformFinalBlock(plainBytes, 0, plainBytes.Length);
-        
-        // Combine IV and encrypted data
-        var result = new byte[aes.IV.Length + encrypted.Length];
-        Array.Copy(aes.IV, 0, result, 0, aes.IV.Length);
-        Array.Copy(encrypted, 0, result, aes.IV.Length, encrypted.Length);
-        
-        return Convert.ToBase64String(result);
-    }
-
-    private (string Username, string Password)? DecryptAuthToken(string token)
-    {
-        try
-        {
-            var data = Convert.FromBase64String(token);
-            var key = Encoding.UTF8.GetBytes(_config.SecretKey.PadRight(32).Substring(0, 32));
-            
-            using var aes = Aes.Create();
-            aes.Key = key;
-            
-            var iv = new byte[aes.IV.Length];
-            var encrypted = new byte[data.Length - iv.Length];
-            Array.Copy(data, 0, iv, 0, iv.Length);
-            Array.Copy(data, iv.Length, encrypted, 0, encrypted.Length);
-            aes.IV = iv;
-            
-            using var decryptor = aes.CreateDecryptor();
-            var decrypted = decryptor.TransformFinalBlock(encrypted, 0, encrypted.Length);
-            var decryptedText = Encoding.UTF8.GetString(decrypted);
-            
-            var parts = decryptedText.Split(':');
-            if (parts.Length >= 2)
-            {
-                return (parts[0], parts[1]);
-            }
-            
-            return null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 }

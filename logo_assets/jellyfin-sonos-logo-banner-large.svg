@@ -1,0 +1,66 @@
+<svg width="800" height="200" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0f1220"/>
+      <stop offset="100%" stop-color="#1a1f36"/>
+    </linearGradient>
+
+    <!-- Icon gradients -->
+    <linearGradient id="serverGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5fa8ff"/>
+      <stop offset="100%" stop-color="#7b6cff"/>
+    </linearGradient>
+
+    <linearGradient id="speakerGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#9b7bff"/>
+      <stop offset="100%" stop-color="#6a5cff"/>
+    </linearGradient>
+
+    <linearGradient id="waveGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#5fdcff"/>
+      <stop offset="100%" stop-color="#b084ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="200" fill="url(#bg)"/>
+
+  <!-- ICON GROUP -->
+  <g transform="translate(60 70)">
+    <!-- Server -->
+    <rect x="0" y="0" rx="14" width="90" height="28" fill="url(#serverGrad)"/>
+    <rect x="0" y="38" rx="14" width="90" height="28" fill="url(#serverGrad)"/>
+
+    <!-- Server lights -->
+    <circle cx="14" cy="14" r="4" fill="#7CFFB2"/>
+    <circle cx="14" cy="52" r="4" fill="#FF7CCB"/>
+    <circle cx="76" cy="52" r="4" fill="#FFD27C"/>
+
+    <!-- Sound waves -->
+    <g fill="none" stroke="url(#waveGrad)" stroke-linecap="round">
+      <path d="M110 30 C150 5, 190 5, 230 30" stroke-width="10"/>
+      <path d="M110 40 C155 25, 195 25, 245 40" stroke-width="7"/>
+    </g>
+
+    <!-- Speaker -->
+    <g transform="translate(260 -10)">
+      <rect x="0" y="0" width="80" height="100" rx="18" fill="url(#speakerGrad)"/>
+      <circle cx="40" cy="60" r="24" fill="#2b2f55"/>
+      <circle cx="40" cy="60" r="14" fill="#b9a7ff"/>
+      <circle cx="40" cy="26" r="5" fill="#d6ccff"/>
+    </g>
+  </g>
+
+  <!-- TEXT -->
+  <text
+    x="420"
+    y="125"
+    fill="url(#waveGrad)"
+    font-size="96"
+    font-weight="700"
+    letter-spacing="2"
+    font-family="Rounded, 'Segoe UI', 'Inter', 'Nunito', 'Arial Rounded MT Bold', system-ui, sans-serif">
+    music
+  </text>
+</svg>

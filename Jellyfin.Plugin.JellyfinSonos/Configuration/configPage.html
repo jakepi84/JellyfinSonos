@@ -42,7 +42,7 @@
                         <div class="inputContainer">
                             <label class="inputLabel inputLabelUnfocused" for="secretKey">Secret Key:</label>
                             <input id="secretKey" name="secretKey" type="password" is="emby-input" class="emby-input" />
-                            <div class="fieldDescription">Secret key for encrypting credentials (generate a secure random string)</div>
+                            <div class="fieldDescription">Secret key used to sign OAuth tokens (generate a secure random string, 32+ characters recommended)</div>
                         </div>
                     </div>
 
@@ -51,7 +51,14 @@
                         <ol>
                             <li>Fill in the configuration above and save</li>
                             <li>Register your Jellyfin server with the Sonos Developer Portal</li>
-                            <li>Use the following SMAPI endpoint URL: <code id="smapiEndpoint"></code></li>
+                            <li>Use the following endpoints:
+                                <ul>
+                                    <li>SMAPI: <code id="smapiEndpoint"></code></li>
+                                    <li>OAuth authorize: <code id="oauthAuthorize"></code></li>
+                                    <li>OAuth token: <code id="oauthToken"></code></li>
+                                </ul>
+                            </li>
+                            <li>In Sonos, choose OAuth authentication and supply the URLs above</li>
                             <li>Once approved, add the service in your Sonos app</li>
                         </ol>
                     </div>
@@ -82,6 +89,8 @@
                 // Update SMAPI endpoint display
                 var baseUrl = config.ExternalUrl || window.location.origin;
                 document.getElementById('smapiEndpoint').textContent = baseUrl + '/sonos/smapi';
+                document.getElementById('oauthAuthorize').textContent = baseUrl + '/sonos/oauth/authorize';
+                document.getElementById('oauthToken').textContent = baseUrl + '/sonos/oauth/token';
                 
                 Dashboard.hideLoadingMsg();
             });

@@ -1,0 +1,50 @@
+<svg width="180" height="20" viewBox="0 0 180 20" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0f1220"/>
+      <stop offset="100%" stop-color="#1a1f36"/>
+    </linearGradient>
+
+    <linearGradient id="serverGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5fa8ff"/>
+      <stop offset="100%" stop-color="#7b6cff"/>
+    </linearGradient>
+
+    <linearGradient id="speakerGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#9b7bff"/>
+      <stop offset="100%" stop-color="#6a5cff"/>
+    </linearGradient>
+
+    <linearGradient id="waveGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#5fdcff"/>
+      <stop offset="100%" stop-color="#b084ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="180" height="20" fill="url(#bg)"/>
+
+  <!-- Server -->
+  <g transform="translate(6 5)">
+    <rect x="0" y="0" rx="3" ry="3" width="24" height="4" fill="url(#serverGrad)"/>
+    <rect x="0" y="6" rx="3" ry="3" width="24" height="4" fill="url(#serverGrad)"/>
+
+    <!-- Lights -->
+    <circle cx="4" cy="2" r="1" fill="#7CFFB2"/>
+    <circle cx="4" cy="8" r="1" fill="#FF7CCB"/>
+    <circle cx="20" cy="8" r="1" fill="#FFD27C"/>
+  </g>
+
+  <!-- Sound waves -->
+  <g fill="none" stroke="url(#waveGrad)" stroke-linecap="round">
+    <path d="M42 10 C50 6, 58 6, 66 10" stroke-width="2"/>
+    <path d="M42 10 C52 10, 60 10, 70 10" stroke-width="1.5"/>
+  </g>
+
+  <!-- Speaker -->
+  <g transform="translate(74 3)">
+    <rect x="0" y="0" width="16" height="14" rx="3" fill="url(#speakerGrad)"/>
+    <circle cx="8" cy="9" r="4" fill="#2b2f55"/>
+    <circle cx="8" cy="9" r="2.3" fill="#b9a7ff"/>
+  </g>
+</svg>

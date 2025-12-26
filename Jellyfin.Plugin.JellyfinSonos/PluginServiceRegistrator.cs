@@ -14,7 +14,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
         // Register services as singletons
-        serviceCollection.AddSingleton<LinkCodeService>();
+        serviceCollection.AddSingleton<OAuthService>();
         serviceCollection.AddSingleton<JellyfinMusicService>();
         serviceCollection.AddSingleton<SonosService>();
     }

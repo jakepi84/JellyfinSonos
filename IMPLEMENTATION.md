@@ -22,10 +22,10 @@ This implementation provides a complete Jellyfin plugin structure for integratin
    - **ISonosService.cs**: SMAPI service interface definition
    - **SonosService.cs**: Core SMAPI implementation
    - **JellyfinMusicService.cs**: Integration with Jellyfin library
-   - **LinkCodeService.cs**: Device authorization management
+   - **OAuthService.cs**: OAuth authorization code + refresh token helpers (signs access tokens)
 
 4. **API Controllers**
-   - **SonosController.cs**: REST endpoints (login, authorize, strings, presentationMap, stream)
+   - **SonosController.cs**: REST endpoints (OAuth authorize/token, strings, presentationMap, stream)
    - **SmapiController.cs**: SOAP endpoint for SMAPI requests
 
 5. **Configuration Page**
@@ -41,14 +41,13 @@ The plugin implements SMAPI (Sonos Music API Protocol) using a manual SOAP handl
 2. Manual SOAP handling provides more control and flexibility
 3. Simpler integration with Jellyfin's controller-based API
 
-### Authentication Flow
-Implements AppLink authentication:
-1. Sonos calls `getAppLink` - plugin returns login URL with link code
-2. User opens URL in browser, enters Jellyfin credentials
-3. Credentials stored with link code
-4. Sonos calls `getDeviceAuthToken` with link code
-5. Plugin returns encrypted auth token
-6. Token used for subsequent SMAPI calls
+### Authentication Flow (OAuth)
+Implements OAuth 2.0 Authorization Code with refresh tokens (PKCE supported):
+1. Sonos opens `/sonos/oauth/authorize` with `response_type=code`, `client_id`, `redirect_uri`, optional PKCE params
+2. User signs in; plugin issues short-lived authorization code bound to client + redirect URI
+3. Sonos exchanges the code at `/sonos/oauth/token` (`grant_type=authorization_code`) to receive access/refresh tokens (signed with plugin secret)
+4. Sonos includes the access token as a bearer `Authorization` header for SMAPI calls
+5. Refresh flow: Sonos calls `/sonos/oauth/token` with `grant_type=refresh_token` to rotate tokens
 
 ### No Auto-Discovery
 As per requirements, the plugin does NOT implement:
@@ -56,7 +55,7 @@ As per requirements, the plugin does NOT implement:
 - Automatic registration with Sonos systems
 - SSDP/UPnP device discovery
 
-Instead, the service must be registered via Sonos Developer Portal.
+Instead, the service must be registered via Sonos Developer Portal using OAuth authentication.
 
 ## Endpoints
 
@@ -73,23 +72,21 @@ Instead, the service must be registered via Sonos Developer Portal.
   - reportAccountAction
 
 ### REST Endpoints
-- **GET /sonos/login?linkCode={code}** - Login page for authorization
-- **POST /sonos/authorize** - Process credentials
+- **GET /sonos/oauth/authorize** - OAuth authorization page (Authorization Code + PKCE)
+- **POST /sonos/oauth/token** - OAuth token endpoint (authorization_code and refresh_token grants)
 - **GET /sonos/strings.xml** - Localization strings
 - **GET /sonos/presentationMap.xml** - UI configuration
-- **GET /sonos/stream/{trackId}** - Audio streaming (placeholder)
+- **GET /sonos/stream/{trackId}** - Audio streaming (requires bearer access token)
 
 ## Security
 
-### Encryption
-- User credentials encrypted using AES with configured secret key
-- Auth tokens contain encrypted username/password
-- 32-byte key derived from configured secret
-
-### Link Code Security
-- Link codes expire after 10 minutes
-- Single-use codes removed after authorization
-- Random 8-character alphanumeric codes
+### Token Security
+- Access tokens are signed with an HMAC derived from the configured secret key (no plaintext credentials in tokens)
+- Authorization codes are single-use and expire after 10 minutes
+- Refresh tokens expire after 30 days and are rotated on use
+### OAuth Validation
+- PKCE supported (`plain` and `S256`)
+- Redirect URI and client ID are bound to authorization codes
 
 ### Validation
 - User existence verified on authorization

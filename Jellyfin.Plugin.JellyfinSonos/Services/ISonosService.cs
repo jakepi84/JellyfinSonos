@@ -10,22 +10,12 @@ namespace Jellyfin.Plugin.JellyfinSonos.Services;
 public interface ISonosService
 {
     /// <summary>
-    /// Gets app link for device authorization.
+    /// Gets app link for device authorization (used by Sonos to launch OAuth authorize page).
     /// </summary>
     /// <param name="householdId">Household ID.</param>
     /// <returns>App link result.</returns>
     [OperationContract(Action = "http://www.sonos.com/Services/1.1#getAppLink")]
     GetAppLinkResponse GetAppLink(string householdId);
-
-    /// <summary>
-    /// Gets device auth token.
-    /// </summary>
-    /// <param name="householdId">Household ID.</param>
-    /// <param name="linkCode">Link code.</param>
-    /// <param name="linkDeviceId">Link device ID.</param>
-    /// <returns>Device auth token result.</returns>
-    [OperationContract(Action = "http://www.sonos.com/Services/1.1#getDeviceAuthToken")]
-    GetDeviceAuthTokenResponse GetDeviceAuthToken(string householdId, string linkCode, string linkDeviceId);
 
     /// <summary>
     /// Gets metadata for browsing.
@@ -50,9 +40,10 @@ public interface ISonosService
     /// Gets media URI for streaming.
     /// </summary>
     /// <param name="id">Track ID.</param>
+    /// <param name="authToken">Optional bearer token to include on playback requests.</param>
     /// <returns>Media URI result.</returns>
     [OperationContract(Action = "http://www.sonos.com/Services/1.1#getMediaURI")]
-    GetMediaURIResponse GetMediaURI(string id);
+    GetMediaURIResponse GetMediaURI(string id, string? authToken);
 
     /// <summary>
     /// Searches for content.
@@ -128,44 +119,6 @@ public class DeviceLink
     /// </summary>
     [DataMember]
     public bool ShowLinkCode { get; set; }
-}
-
-/// <summary>
-/// Response for GetDeviceAuthToken.
-/// </summary>
-[DataContract]
-public class GetDeviceAuthTokenResponse
-{
-    /// <summary>
-    /// Gets or sets the auth token.
-    /// </summary>
-    [DataMember]
-    public string AuthToken { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Gets or sets the private key.
-    /// </summary>
-    [DataMember]
-    public string PrivateKey { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Gets or sets the user info.
-    /// </summary>
-    [DataMember]
-    public UserInfo? UserInfo { get; set; }
-}
-
-/// <summary>
-/// User info.
-/// </summary>
-[DataContract]
-public class UserInfo
-{
-    /// <summary>
-    /// Gets or sets the nickname.
-    /// </summary>
-    [DataMember]
-    public string Nickname { get; set; } = string.Empty;
 }
 
 /// <summary>
