@@ -18,6 +18,14 @@ public interface ISonosService
     GetAppLinkResponse GetAppLink(string householdId);
 
     /// <summary>
+    /// Gets device auth token from link code (Sonos AppLink authentication).
+    /// </summary>
+    /// <param name="linkCode">Link code from getAppLink.</param>
+    /// <returns>Device auth token result.</returns>
+    [OperationContract(Action = "http://www.sonos.com/Services/1.1#getDeviceAuthToken")]
+    GetDeviceAuthTokenResponse GetDeviceAuthToken(string linkCode);
+
+    /// <summary>
     /// Gets metadata for browsing.
     /// </summary>
     /// <param name="id">Item ID.</param>
@@ -119,6 +127,50 @@ public class DeviceLink
     /// </summary>
     [DataMember]
     public bool ShowLinkCode { get; set; }
+}
+
+/// <summary>
+/// Response for GetDeviceAuthToken.
+/// </summary>
+[DataContract]
+public class GetDeviceAuthTokenResponse
+{
+    /// <summary>
+    /// Gets or sets the auth token (bearer token for subsequent SMAPI calls).
+    /// </summary>
+    [DataMember]
+    public string AuthToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the private key (optional; use same as token for simplicity).
+    /// </summary>
+    [DataMember]
+    public string? PrivateKey { get; set; }
+
+    /// <summary>
+    /// Gets or sets the user info.
+    /// </summary>
+    [DataMember]
+    public UserInfo? UserInfo { get; set; }
+}
+
+/// <summary>
+/// User info for auth token response.
+/// </summary>
+[DataContract]
+public class UserInfo
+{
+    /// <summary>
+    /// Gets or sets the nickname.
+    /// </summary>
+    [DataMember]
+    public string Nickname { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the user ID hash code.
+    /// </summary>
+    [DataMember]
+    public string UserIdHashCode { get; set; } = string.Empty;
 }
 
 /// <summary>

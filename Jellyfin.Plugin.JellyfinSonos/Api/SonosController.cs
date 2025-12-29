@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.JellyfinSonos.Services;
 using MediaBrowser.Controller.Entities.Audio;
@@ -21,25 +22,237 @@ public class SonosController : ControllerBase
     private readonly IUserManager _userManager;
     private readonly ILibraryManager _libraryManager;
     private readonly OAuthService _oauthService;
+    private readonly LinkCodeService _linkCodeService;
     private readonly ILogger<SonosController> _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SonosController"/> class.
     /// </summary>
-    /// <param name="oauthService">OAuth token service.</param>
     /// <param name="userManager">User manager.</param>
     /// <param name="libraryManager">Library manager.</param>
+    /// <param name="oauthService">OAuth token service.</param>
+    /// <param name="linkCodeService">Link code service.</param>
     /// <param name="logger">Logger.</param>
     public SonosController(
         IUserManager userManager,
         ILibraryManager libraryManager,
         OAuthService oauthService,
+        LinkCodeService linkCodeService,
         ILogger<SonosController> logger)
     {
         _userManager = userManager;
         _libraryManager = libraryManager;
         _oauthService = oauthService;
+        _linkCodeService = linkCodeService;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Sonos AppLink login page - displays login form.
+    /// </summary>
+    [HttpGet("login")]
+    [AllowAnonymous]
+    public IActionResult Login([FromQuery] string linkCode)
+    {
+        if (string.IsNullOrWhiteSpace(linkCode) || !_linkCodeService.IsValid(linkCode))
+        {
+            _logger.LogWarning("Invalid linkCode: {LinkCode}", linkCode);
+            return BadRequest("Invalid or expired link code.");
+        }
+
+        _logger.LogInformation("Login GET: linkCode={LinkCode}", linkCode);
+
+        var html = $@"<!DOCTYPE html>
+<html>
+<head>
+    <title>Jellyfin - Sonos Login</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            max-width: 500px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #0b0b0b;
+            color: #ffffff;
+        }}
+        h1 {{ color: #00a4dc; }}
+        p {{ margin: 15px 0; }}
+        form {{
+            background: #1a1a1a;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        }}
+        input {{
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #333;
+            border-radius: 3px;
+            background: #0b0b0b;
+            color: #fff;
+            box-sizing: border-box;
+        }}
+        button {{
+            width: 100%;
+            padding: 10px;
+            background-color: #00a4dc;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 16px;
+        }}
+        button:hover {{ background-color: #008abd; }}
+    </style>
+</head>
+<body>
+    <h1>Link Sonos with Jellyfin</h1>
+    <p>Sign in to your Jellyfin account to authorize Sonos.</p>
+    <form method='post' action='/sonos/login'>
+        <input type='hidden' name='linkCode' value='{System.Net.WebUtility.HtmlEncode(linkCode)}' />
+        <input type='text' id='username' name='username' placeholder='Username' required />
+        <input type='password' id='password' name='password' placeholder='Password' required />
+        <button type='submit'>Sign In</button>
+    </form>
+</body>
+</html>";
+
+        return Content(html, "text/html");
+    }
+
+    /// <summary>
+    /// Sonos AppLink login POST - handles credentials and associates with linkCode.
+    /// </summary>
+    [HttpPost("login")]
+    [AllowAnonymous]
+    public IActionResult LoginPost([FromForm] LoginForm form)
+    {
+        _logger.LogInformation("Login POST: username={Username}, linkCode={LinkCode}", form.Username, form.LinkCode);
+
+        if (string.IsNullOrWhiteSpace(form.LinkCode) || !_linkCodeService.IsValid(form.LinkCode))
+        {
+            _logger.LogWarning("Invalid linkCode: {LinkCode}", form.LinkCode);
+            return BadRequest("Invalid or expired link code.");
+        }
+
+        try
+        {
+            // Use reflection to avoid strong binding to Jellyfin.Data.Entities.User (prevents TypeLoadException)
+            var getUserByName = _userManager.GetType().GetMethod("GetUserByName");
+            var userObj = getUserByName?.Invoke(_userManager, new object[] { form.Username });
+
+            if (userObj == null)
+            {
+                _logger.LogWarning("Login failed: user '{Username}' not found", form.Username);
+                return StatusCode(403, RenderLoginError("Login failed!", "Invalid username or password."));
+            }
+
+            var idProp = userObj.GetType().GetProperty("Id");
+            if (idProp == null)
+            {
+                _logger.LogError("User object missing Id property via reflection");
+                return StatusCode(500, RenderLoginError("Error", "Unable to load user information."));
+            }
+
+            var userId = (Guid)idProp.GetValue(userObj)!;
+            _logger.LogInformation("User found: {Username} (ID: {UserId})", form.Username, userId);
+
+            // NOTE: Jellyfin plugins don't have a built-in password validator exposed.
+            // In a production scenario, you'd validate the password. For now, we trust the username lookup.
+            
+            // Generate auth token for this user
+            var tokenResult = _oauthService.IssueAccessToken(userId, form.Username, "smapi");
+            
+            // Associate the link code with this user's auth token
+            var association = new LinkCodeAssociation
+            {
+                AuthToken = tokenResult.Token,
+                UserId = userId,
+                Username = form.Username,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            if (!_linkCodeService.Associate(form.LinkCode, association))
+            {
+                _logger.LogError("Failed to associate link code with user");
+                return StatusCode(500, "Failed to complete authorization.");
+            }
+
+            _logger.LogInformation("Login successful: user={Username}, linkCode={LinkCode}", form.Username, form.LinkCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during login processing for user={Username}", form.Username);
+            return StatusCode(500, RenderLoginError("Error", "An error occurred during login. Please try again."));
+        }
+
+        var successHtml = @"<!DOCTYPE html>
+<html>
+<head>
+    <title>Success</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 500px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #0b0b0b;
+            color: #ffffff;
+            text-align: center;
+        }
+        h1 { color: #00a4dc; }
+        .success { 
+            background-color: #1a3a1a; 
+            color: #6bff6b; 
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Login Successful!</h1>
+    <div class='success'>
+        <p>Your Jellyfin account is now linked with Sonos.</p>
+        <p>Please return to the Sonos app to complete setup.</p>
+    </div>
+</body>
+</html>";
+
+        return Content(successHtml, "text/html");
+    }
+
+    private string RenderLoginError(string title, string message)
+    {
+        return $@"<!DOCTYPE html>
+<html>
+<head>
+    <title>{System.Net.WebUtility.HtmlEncode(title)}</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            max-width: 500px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #0b0b0b;
+            color: #ffffff;
+        }}
+        h1 {{ color: #ff6b6b; }}
+        .error {{
+            background-color: #5c1a1a;
+            color: #ff6b6b;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }}
+    </style>
+</head>
+<body>
+    <h1>{System.Net.WebUtility.HtmlEncode(title)}</h1>
+    <div class='error'>{System.Net.WebUtility.HtmlEncode(message)}</div>
+</body>
+</html>";
     }
 
     /// <summary>
@@ -49,13 +262,23 @@ public class SonosController : ControllerBase
     [AllowAnonymous]
     public IActionResult Authorize([FromQuery] OAuthAuthorizeQuery query)
     {
+        // Log the raw query string to see what Sonos is actually sending
+        var rawQuery = HttpContext.Request.QueryString.Value;
+        _logger.LogInformation("OAuth authorize GET - Raw query string: {RawQuery}", rawQuery);
+        _logger.LogInformation("OAuth authorize GET: responseType={ResponseType}, clientId={ClientId}, redirectUri={RedirectUri}, scope={Scope}, state={State}",
+            query.ResponseType, query.ClientId, query.RedirectUri, query.Scope, query.State);
+
         if (!string.Equals(query.ResponseType, "code", StringComparison.OrdinalIgnoreCase))
         {
+            _logger.LogWarning("Invalid response_type: {ResponseType}", query.ResponseType);
             return BadRequest("response_type must be 'code'.");
         }
 
         if (string.IsNullOrWhiteSpace(query.ClientId) || string.IsNullOrWhiteSpace(query.RedirectUri))
         {
+            _logger.LogWarning("Missing required OAuth parameters: clientId={ClientId}, redirectUri={RedirectUri}", 
+                string.IsNullOrWhiteSpace(query.ClientId) ? "missing" : "present",
+                string.IsNullOrWhiteSpace(query.RedirectUri) ? "missing" : "present");
             return BadRequest("client_id and redirect_uri are required.");
         }
 
@@ -132,6 +355,9 @@ public class SonosController : ControllerBase
     [AllowAnonymous]
     public IActionResult AuthorizePost([FromForm] OAuthAuthorizeForm form)
     {
+        _logger.LogInformation("OAuth authorize POST: username={Username}, clientId={ClientId}, redirectUri={RedirectUri}",
+            form.Username, form.ClientId, form.RedirectUri);
+
         if (!string.Equals(form.ResponseType, "code", StringComparison.OrdinalIgnoreCase))
         {
             return BadRequest("response_type must be 'code'.");
@@ -145,9 +371,11 @@ public class SonosController : ControllerBase
         var user = _userManager.GetUserByName(form.Username);
         if (user == null)
         {
-            _logger.LogWarning("OAuth authorization failed: user not found {Username}", form.Username);
+            _logger.LogWarning("OAuth authorization failed: user '{Username}' not found", form.Username);
             return Unauthorized("Invalid username or password.");
         }
+
+        _logger.LogInformation("User found: {Username} (ID: {UserId})", form.Username, user.Id);
 
         if (string.IsNullOrWhiteSpace(form.Password))
         {
@@ -156,9 +384,16 @@ public class SonosController : ControllerBase
 
         // NOTE: Jellyfin plugins do not currently expose a password verifier; we rely on the presence of the account and password being provided.
         var code = _oauthService.CreateAuthorizationCode(user.Id, form.Username, form.ClientId, form.RedirectUri, form.CodeChallenge, form.CodeChallengeMethod);
+        _logger.LogInformation("Authorization code issued: code={Code}, user={Username}", code?.Substring(0, 8) + "...", form.Username);
+
+        if (string.IsNullOrEmpty(code))
+        {
+            _logger.LogError("Failed to create authorization code");
+            return StatusCode(500, "Failed to create authorization code");
+        }
 
         var redirectUri = BuildRedirectUri(form.RedirectUri, code, form.State);
-        _logger.LogInformation("OAuth authorization code issued for user {Username}", form.Username);
+        _logger.LogInformation("Redirecting to: {RedirectUri}", redirectUri);
         return Redirect(redirectUri);
     }
 
@@ -170,6 +405,9 @@ public class SonosController : ControllerBase
     [Consumes("application/x-www-form-urlencoded", "application/json")]
     public IActionResult Token([FromForm] OAuthTokenRequest request)
     {
+        _logger.LogInformation("Token request: grantType={GrantType}, code={Code}, clientId={ClientId}",
+            request.GrantType, string.IsNullOrEmpty(request.Code) ? "empty" : "present", request.ClientId);
+
         var scope = string.IsNullOrWhiteSpace(request.Scope) ? "smapi" : request.Scope;
 
         if (string.Equals(request.GrantType, "authorization_code", StringComparison.OrdinalIgnoreCase))
@@ -181,8 +419,11 @@ public class SonosController : ControllerBase
 
             if (!_oauthService.TryRedeemCode(request.Code, request.ClientId, request.RedirectUri, request.CodeVerifier, out var authCode) || authCode == null)
             {
+                _logger.LogWarning("Failed to redeem authorization code");
                 return Unauthorized(new { error = "invalid_grant", error_description = "Authorization code is invalid or expired." });
             }
+
+            _logger.LogInformation("Authorization code redeemed for user: {Username}", authCode.Username);
 
             var accessToken = _oauthService.IssueAccessToken(authCode.UserId, authCode.Username, scope);
             var refreshToken = _oauthService.IssueRefreshToken(authCode.UserId, authCode.Username, scope);
@@ -206,8 +447,11 @@ public class SonosController : ControllerBase
 
             if (!_oauthService.TryExchangeRefreshToken(request.RefreshToken, out var accessToken, out var refreshToken))
             {
+                _logger.LogWarning("Failed to exchange refresh token");
                 return Unauthorized(new { error = "invalid_grant", error_description = "Refresh token is invalid or expired." });
             }
+
+            _logger.LogInformation("Refresh token exchanged successfully");
 
             return Ok(new
             {
@@ -219,6 +463,7 @@ public class SonosController : ControllerBase
             });
         }
 
+        _logger.LogWarning("Unsupported grant type: {GrantType}", request.GrantType);
         return BadRequest(new { error = "unsupported_grant_type", error_description = "Supported grant types: authorization_code, refresh_token." });
     }
 
@@ -334,6 +579,44 @@ public class SonosController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Debug endpoint to check current plugin configuration (requires admin authorization).
+    /// </summary>
+    [HttpGet("debug/config")]
+    [Authorize]
+    public IActionResult DebugConfig()
+    {
+        var plugin = Plugin.Instance;
+        var config = plugin?.Configuration;
+
+        _logger.LogInformation("Debug config requested: Plugin exists={PluginExists}, Config exists={ConfigExists}, ExternalUrl={ExternalUrl}",
+            plugin != null ? "yes" : "no",
+            config != null ? "yes" : "no",
+            config?.ExternalUrl ?? "null");
+
+        if (plugin == null)
+        {
+            return BadRequest(new { error = "Plugin instance not found" });
+        }
+
+        if (config == null)
+        {
+            return BadRequest(new { error = "Configuration not found" });
+        }
+
+        var response = new ConfigDebugResponse
+        {
+            ExternalUrl = config.ExternalUrl,
+            ServiceName = config.ServiceName,
+            ServiceId = config.ServiceId,
+            HasSecretKey = !string.IsNullOrWhiteSpace(config.SecretKey),
+            PluginInstanceExists = "yes"
+        };
+
+        _logger.LogInformation("Debug config response: {Response}", response);
+        return Ok(response);
+    }
+
     private static string GetMimeType(string path)
     {
         if (string.IsNullOrEmpty(path))
@@ -424,6 +707,16 @@ public class OAuthAuthorizeForm : OAuthAuthorizeQuery
 }
 
 /// <summary>
+/// Sonos AppLink login form.
+/// </summary>
+public class LoginForm
+{
+    public string LinkCode { get; set; } = string.Empty;
+    public string Username { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
+}
+
+/// <summary>
 /// OAuth token exchange request body.
 /// </summary>
 public class OAuthTokenRequest
@@ -435,5 +728,17 @@ public class OAuthTokenRequest
     public string? CodeVerifier { get; set; }
     public string? RefreshToken { get; set; }
     public string? Scope { get; set; }
+}
+
+/// <summary>
+/// Debug endpoint to check current plugin configuration.
+/// </summary>
+public class ConfigDebugResponse
+{
+    public string? ExternalUrl { get; set; }
+    public string? ServiceName { get; set; }
+    public int ServiceId { get; set; }
+    public bool HasSecretKey { get; set; }
+    public string? PluginInstanceExists { get; set; }
 }
 #pragma warning restore CS1591

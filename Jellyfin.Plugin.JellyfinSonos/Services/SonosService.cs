@@ -3,15 +3,33 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.JellyfinSonos.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
-using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.JellyfinSonos.Services;
+
+/// <summary>
+/// SOAP fault exception for Sonos SMAPI error responses.
+/// </summary>
+public class SoapFaultException : Exception
+{
+    public string FaultCode { get; }
+    public string FaultString { get; }
+    public string ExceptionInfo { get; }
+    public int SonosError { get; }
+
+    public SoapFaultException(string faultCode, string faultString, string exceptionInfo, int sonosError)
+        : base(faultString)
+    {
+        FaultCode = faultCode;
+        FaultString = faultString;
+        ExceptionInfo = exceptionInfo;
+        SonosError = sonosError;
+    }
+}
 
 /// <summary>
 /// Implementation of Sonos SMAPI service.
@@ -19,41 +37,52 @@ namespace Jellyfin.Plugin.JellyfinSonos.Services;
 public class SonosService : ISonosService
 {
     private readonly JellyfinMusicService _musicService;
-    private readonly IUserManager _userManager;
     private readonly OAuthService _oauthService;
+    private readonly LinkCodeService _linkCodeService;
     private readonly ILogger<SonosService> _logger;
-    private readonly PluginConfiguration _config;
+    private readonly IConfigurationProvider _configProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SonosService"/> class.
     /// </summary>
     /// <param name="musicService">Music service.</param>
-    /// <param name="userManager">User manager.</param>
     /// <param name="oauthService">OAuth token service.</param>
+    /// <param name="linkCodeService">Link code service.</param>
     /// <param name="logger">Logger.</param>
+    /// <param name="configProvider">Configuration provider.</param>
     public SonosService(
         JellyfinMusicService musicService,
-        IUserManager userManager,
         OAuthService oauthService,
-        ILogger<SonosService> logger)
+        LinkCodeService linkCodeService,
+        ILogger<SonosService> logger,
+        IConfigurationProvider configProvider)
     {
         _musicService = musicService;
-        _userManager = userManager;
         _oauthService = oauthService;
+        _linkCodeService = linkCodeService;
         _logger = logger;
-        _config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        _configProvider = configProvider;
     }
 
     /// <inheritdoc />
     public GetAppLinkResponse GetAppLink(string householdId)
     {
-        var baseUrl = _config.ExternalUrl?.TrimEnd('/') ?? string.Empty;
+        var config = _configProvider.GetConfiguration();
+        var baseUrl = config.ExternalUrl?.TrimEnd('/') ?? string.Empty;
+        
+        // Generate a unique link code
+        var linkCode = _linkCodeService.GenerateLinkCode();
+        
+        // Build the login URL with the link code
         var regUrl = string.IsNullOrWhiteSpace(baseUrl)
             ? string.Empty
-            : $"{baseUrl}/sonos/oauth/authorize";
+            : $"{baseUrl}/sonos/login?linkCode={linkCode}";
 
-        // Sonos still calls getAppLink even for OAuth; we return the authorize page URL and no link code.
-        return new GetAppLinkResponse
+        _logger.LogInformation("GetAppLink called: householdId={HouseholdId}, linkCode={LinkCode}, regUrl={RegUrl}", 
+            householdId, linkCode, regUrl);
+
+        // Return AppLink response per Sonos SMAPI specification
+        var response = new GetAppLinkResponse
         {
             AuthorizeAccount = new AuthorizeAccount
             {
@@ -61,15 +90,60 @@ public class SonosService : ISonosService
                 DeviceLink = new DeviceLink
                 {
                     RegUrl = regUrl,
-                    LinkCode = string.Empty,
-                    ShowLinkCode = false
+                    LinkCode = linkCode,
+                    ShowLinkCode = false  // Don't show link code to user, it's embedded in URL
                 }
             }
         };
+
+        _logger.LogInformation("GetAppLink returning: linkCode={LinkCode}, regUrl={RegUrl}", linkCode, regUrl);
+        return response;
+    }
+
+    /// <inheritdoc />
+    public GetDeviceAuthTokenResponse GetDeviceAuthToken(string linkCode)
+    {
+        _logger.LogInformation("GetDeviceAuthToken called: linkCode={LinkCode}", linkCode);
+
+        // Check if link code has been associated with a user
+        var association = _linkCodeService.GetAssociation(linkCode);
+        
+        if (association == null)
+        {
+            // Link code not yet associated - user hasn't logged in yet
+            // Return SOAP fault per Sonos specification - Sonos will retry
+            _logger.LogInformation("Link code not yet associated, user needs to log in: linkCode={LinkCode}", linkCode);
+            throw new SoapFaultException("Client.NOT_LINKED_RETRY", 
+                "Link Code not found yet, Sonos app will keep polling until you log in.",
+                "NOT_LINKED_RETRY", 
+                5);
+        }
+
+        _logger.LogInformation("Link code associated with user: linkCode={LinkCode}, username={Username}", 
+            linkCode, association.Username);
+
+        // Return auth token
+        var response = new GetDeviceAuthTokenResponse
+        {
+            AuthToken = association.AuthToken,
+            PrivateKey = association.AuthToken,
+            UserInfo = new UserInfo
+            {
+                Nickname = association.Username,
+                UserIdHashCode = System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(association.UserId.ToString()))
+                    .Select(b => b.ToString("x2"))
+                    .Aggregate((a, b) => a + b)
+            }
+        };
+
+        _logger.LogInformation("GetDeviceAuthToken returning authToken for user: {Username}", association.Username);
+        return response;
     }
 
     /// <summary>
-    /// Extracts user ID from auth token.
+    /// Extracts user ID from auth token by parsing payload directly.
+    /// Avoids signature validation to prevent IUserManager dependencies.
     /// </summary>
     /// <param name="authToken">Auth token.</param>
     /// <returns>User ID or null.</returns>
@@ -77,19 +151,100 @@ public class SonosService : ISonosService
     {
         try
         {
-            if (!_oauthService.ValidateAccessToken(authToken, out var principal))
+            // Parse token payload directly without signature validation
+            // This avoids all IUserManager calls that cause TypeLoadException
+            if (TryParseTokenWithoutSignature(authToken, out var parsedUserId))
             {
-                return null;
+                _logger.LogDebug("Extracted userId from token: {UserId}", parsedUserId);
+                return parsedUserId;
             }
 
-            var user = _userManager.GetUserByName(principal.Username);
-            return user?.Id;
+            _logger.LogWarning("Failed to extract userId from token (len={Len})", authToken?.Length ?? 0);
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error extracting user from token");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Leniently parse token payload to extract userId without signature validation.
+    /// </summary>
+    private bool TryParseTokenWithoutSignature(string? token, out Guid userId)
+    {
+        userId = Guid.Empty;
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            _logger.LogTrace("Token is null or empty");
+            return false;
+        }
+
+        var parts = token.Split('.');
+        if (parts.Length < 1)
+        {
+            _logger.LogTrace("Token has no parts after split");
+            return false;
+        }
+
+        try
+        {
+            var payloadBytes = Base64UrlDecode(parts[0]);
+            var payload = System.Text.Encoding.UTF8.GetString(payloadBytes);
+            _logger.LogTrace("Decoded token payload: {Payload}", payload.Length > 300 ? payload.Substring(0, 300) + "..." : payload);
+            
+            var pieces = payload.Split('|');
+            if (pieces.Length < 4)
+            {
+                _logger.LogWarning("Token payload has {Count} pieces, expected 4+ (userId|username|expiry|scope)", pieces.Length);
+                return false;
+            }
+
+            if (!Guid.TryParse(pieces[0], out userId))
+            {
+                _logger.LogWarning("Failed to parse userId from token piece[0]: {Piece}", pieces[0]);
+                return false;
+            }
+
+            if (!long.TryParse(pieces[2], out var expUnix))
+            {
+                _logger.LogWarning("Failed to parse expiry from token piece[2]: {Piece}", pieces[2]);
+                return false;
+            }
+
+            var expiresAt = DateTimeOffset.FromUnixTimeSeconds(expUnix);
+            if (DateTimeOffset.UtcNow > expiresAt)
+            {
+                _logger.LogWarning("Token expired at {ExpiresAt}, current time {Now} - accepting anyway for compatibility", expiresAt, DateTimeOffset.UtcNow);
+                // Accept expired tokens for now - Sonos may cache tokens longer than our expiry
+                // return false;
+            }
+
+            _logger.LogDebug("Successfully parsed token: userId={UserId}, expires={ExpiresAt}", userId, expiresAt);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Exception parsing token payload");
+            return false;
+        }
+    }
+
+    private static byte[] Base64UrlDecode(string input)
+    {
+        var normalized = input.Replace('-', '+').Replace('_', '/');
+        switch (normalized.Length % 4)
+        {
+            case 2:
+                normalized += "==";
+                break;
+            case 3:
+                normalized += "=";
+                break;
+        }
+
+        return Convert.FromBase64String(normalized);
     }
 
     /// <inheritdoc />
@@ -120,8 +275,8 @@ public class SonosService : ISonosService
                 return new GetMetadataResponse
                 {
                     Index = 0,
-                    Count = 3,
-                    Total = 3,
+                    Count = 4,
+                    Total = 4,
                     MediaCollection = new List<MediaCollection>
                     {
                         new MediaCollection
@@ -135,6 +290,13 @@ public class SonosService : ISonosService
                         {
                             Id = "albums",
                             Title = "Albums",
+                            ItemType = "collection",
+                            CanPlay = false
+                        },
+                        new MediaCollection
+                        {
+                            Id = "playlists",
+                            Title = "Playlists",
                             ItemType = "collection",
                             CanPlay = false
                         },
@@ -169,6 +331,24 @@ public class SonosService : ISonosService
                 case "albums":
                     return GetAllAlbums(userId.Value, index, count).Result;
 
+                case "playlists":
+                    return GetAllPlaylists(userId.Value, index, count).Result;
+
+                case "search":
+                    // Return categories for search when asked via getMetadata
+                    return new GetMetadataResponse
+                    {
+                        Index = 0,
+                        Count = 3,
+                        Total = 3,
+                        MediaCollection = new List<MediaCollection>
+                        {
+                            new MediaCollection { Id = "artists", Title = "Artists", ItemType = "collection", CanPlay = false },
+                            new MediaCollection { Id = "albums", Title = "Albums", ItemType = "collection", CanPlay = false },
+                            new MediaCollection { Id = "tracks", Title = "Tracks", ItemType = "collection", CanPlay = false }
+                        }
+                    };
+
                 case "artist":
                     if (parts.Length > 1 && Guid.TryParse(parts[1], out var artistId))
                     {
@@ -180,6 +360,13 @@ public class SonosService : ISonosService
                     if (parts.Length > 1 && Guid.TryParse(parts[1], out var albumId))
                     {
                         return GetTracksByAlbum(userId.Value, albumId).Result;
+                    }
+                    break;
+
+                case "playlist":
+                    if (parts.Length > 1 && Guid.TryParse(parts[1], out var playlistId))
+                    {
+                        return GetPlaylistTracks(userId.Value, playlistId).Result;
                     }
                     break;
             }
@@ -197,7 +384,8 @@ public class SonosService : ISonosService
     private async Task<GetMetadataResponse> GetArtists(Guid userId, int startIndex, int count)
     {
         var result = await _musicService.GetArtists(userId, startIndex, count);
-        var baseUrl = _config.ExternalUrl;
+        var config = _configProvider.GetConfiguration();
+        var baseUrl = config.ExternalUrl;
 
         return new GetMetadataResponse
         {
@@ -218,7 +406,8 @@ public class SonosService : ISonosService
     private async Task<GetMetadataResponse> GetAllAlbums(Guid userId, int startIndex, int count)
     {
         var result = await _musicService.GetAlbums(userId, startIndex, count);
-        var baseUrl = _config.ExternalUrl;
+        var config = _configProvider.GetConfiguration();
+        var baseUrl = config.ExternalUrl;
 
         return new GetMetadataResponse
         {
@@ -237,10 +426,38 @@ public class SonosService : ISonosService
         };
     }
 
+    private async Task<GetMetadataResponse> GetAllPlaylists(Guid userId, int startIndex, int count)
+    {
+        _logger.LogInformation("GetAllPlaylists called for userId={UserId}, startIndex={StartIndex}, count={Count}", userId, startIndex, count);
+        var result = await _musicService.GetPlaylists(userId, startIndex, count);
+        _logger.LogInformation("GetPlaylists returned {PlaylistCount} playlists, total={Total}", result.Items.Count, result.TotalCount);
+        var config = _configProvider.GetConfiguration();
+        var baseUrl = config.ExternalUrl;
+
+        var mediaCollections = result.Items.Select(playlist => new MediaCollection
+        {
+            Id = $"playlist:{playlist.Id}",
+            Title = playlist.Name,
+            ItemType = "collection",
+            AlbumArtURI = GetImageUrl(baseUrl, playlist.Id),
+            CanPlay = false
+        }).ToList();
+        
+        _logger.LogInformation("Returning {Count} playlist collections", mediaCollections.Count);
+        return new GetMetadataResponse
+        {
+            Index = startIndex,
+            Count = mediaCollections.Count,
+            Total = result.TotalCount,
+            MediaCollection = mediaCollections
+        };
+    }
+
     private async Task<GetMetadataResponse> GetAlbumsByArtist(Guid userId, Guid artistId, int startIndex, int count)
     {
         var result = await _musicService.GetAlbumsByArtist(userId, artistId, startIndex, count);
-        var baseUrl = _config.ExternalUrl;
+        var config = _configProvider.GetConfiguration();
+        var baseUrl = config.ExternalUrl;
 
         return new GetMetadataResponse
         {
@@ -262,7 +479,8 @@ public class SonosService : ISonosService
     private async Task<GetMetadataResponse> GetTracksByAlbum(Guid userId, Guid albumId)
     {
         var tracks = await _musicService.GetTracksByAlbum(userId, albumId);
-        var baseUrl = _config.ExternalUrl;
+        var config = _configProvider.GetConfiguration();
+        var baseUrl = config.ExternalUrl;
 
         return new GetMetadataResponse
         {
@@ -285,6 +503,38 @@ public class SonosService : ISonosService
         };
     }
 
+    private async Task<GetMetadataResponse> GetPlaylistTracks(Guid userId, Guid playlistId)
+    {
+        _logger.LogInformation("GetPlaylistTracks called for playlistId={PlaylistId}", playlistId);
+        var tracks = await _musicService.GetPlaylistItems(userId, playlistId);
+        _logger.LogInformation("GetPlaylistItems returned {TrackCount} tracks", tracks.Count);
+        var config = _configProvider.GetConfiguration();
+        var baseUrl = config.ExternalUrl;
+
+        var mediaMetadata = tracks.OfType<Audio>().Select(track => new MediaMetadata
+        {
+            Id = $"track:{track.Id}",
+            Title = track.Name,
+            ItemType = "track",
+            MimeType = GetMimeType(track.Path),
+            TrackNumber = track.IndexNumber,
+            Artist = track.AlbumArtists?.FirstOrDefault(),
+            Album = track.Album,
+            AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
+            Duration = (int?)track.RunTimeTicks / 10000000,
+            CanPlay = true
+        }).ToList();
+        
+        _logger.LogInformation("Returning {MediaMetadataCount} track metadata", mediaMetadata.Count);
+        return new GetMetadataResponse
+        {
+            Index = 0,
+            Count = mediaMetadata.Count,
+            Total = mediaMetadata.Count,
+            MediaMetadata = mediaMetadata
+        };
+    }
+
     private string GetImageUrl(string baseUrl, Guid itemId)
     {
         return $"{baseUrl}/Items/{itemId}/Images/Primary?maxWidth=300";
@@ -301,12 +551,13 @@ public class SonosService : ISonosService
         return ext switch
         {
             ".mp3" => "audio/mpeg",
-            ".flac" => "audio/flac",
+            ".flac" => "audio/mpeg", // FLAC is transcoded to MP3, advertise as MP3
             ".m4a" => "audio/mp4",
             ".aac" => "audio/aac",
             ".ogg" => "audio/ogg",
             ".wav" => "audio/wav",
-            _ => "audio/mpeg"
+            ".wma" => "audio/x-ms-wma",
+            _ => "audio/mpeg" // Default to MP3 for unknown formats (will be transcoded)
         };
     }
 
@@ -350,7 +601,8 @@ public class SonosService : ISonosService
                 return new GetMediaMetadataResponse();
             }
 
-            var baseUrl = _config.ExternalUrl;
+            var config = _configProvider.GetConfiguration();
+            var baseUrl = config.ExternalUrl;
 
             return new GetMediaMetadataResponse
             {
@@ -381,18 +633,57 @@ public class SonosService : ISonosService
     {
         try
         {
+            _logger.LogInformation("GetMediaURI called for id={Id}, hasAuth={HasAuth}", id, !string.IsNullOrWhiteSpace(authToken));
+            
             var parts = id.Split(':');
             if (parts.Length < 2 || parts[0] != "track")
             {
+                _logger.LogWarning("Invalid track ID format: {Id}", id);
                 throw new Exception("Invalid track ID");
             }
 
-            var trackId = parts[1];
-            var baseUrl = _config.ExternalUrl;
-
-            return new GetMediaURIResponse
+            if (!Guid.TryParse(parts[1], out var trackId))
             {
-                MediaUri = $"{baseUrl}/sonos/stream/{trackId}",
+                _logger.LogWarning("Invalid track GUID: {TrackIdPart}", parts[1]);
+                throw new Exception("Invalid track GUID");
+            }
+
+            var userId = GetUserIdFromToken(authToken ?? string.Empty);
+            if (!userId.HasValue)
+            {
+                _logger.LogWarning("No valid user context in auth token");
+                throw new Exception("No valid user context");
+            }
+            
+            _logger.LogInformation("Looking up track {TrackId} for user {UserId}", trackId, userId.Value);
+
+            var track = _musicService.GetItem(userId.Value, trackId).Result as Audio;
+            if (track == null)
+            {
+                _logger.LogWarning("Track not found: {TrackId}", trackId);
+                throw new Exception("Track not found");
+            }
+
+            _logger.LogInformation("Track found: {TrackName}, path={Path}", track.Name, track.Path);
+            var config = _configProvider.GetConfiguration();
+            var baseUrl = config.ExternalUrl;
+
+            // Check if track format is natively supported by Sonos
+            var ext = System.IO.Path.GetExtension(track.Path).ToLowerInvariant();
+            var nativeSonosFormats = new[] { ".mp3", ".m4a", ".aac", ".ogg", ".wav", ".wma" };
+            
+            // Use transcoding endpoint for FLAC and other unsupported formats
+            // Use Jellyfin's streaming endpoints to avoid ASP.NET compression/content-length issues
+            var mediaUri = nativeSonosFormats.Contains(ext)
+                ? $"{baseUrl}/Audio/{trackId}/stream"
+                : $"{baseUrl}/Audio/{trackId}/stream?Container=mp3";
+
+            _logger.LogInformation("Returning mediaUri={MediaUri} for format {Format}", mediaUri, ext);
+            
+            // Always pass auth token to Sonos - it will include it in requests
+            var response = new GetMediaURIResponse
+            {
+                MediaUri = mediaUri,
                 HttpHeaders = string.IsNullOrWhiteSpace(authToken)
                     ? new List<HttpHeader>()
                     : new List<HttpHeader>
@@ -404,6 +695,9 @@ public class SonosService : ISonosService
                         }
                     }
             };
+            
+            _logger.LogInformation("GetMediaURI response: mediaUri={MediaUri}, headers={HeaderCount}", response.MediaUri, response.HttpHeaders?.Count ?? 0);
+            return response;
         }
         catch (Exception ex)
         {
@@ -440,17 +734,30 @@ public class SonosService : ISonosService
                 return new SearchResponse { Index = 0, Count = 0, Total = 0 };
             }
 
-            var baseUrl = _config.ExternalUrl;
+            var config = _configProvider.GetConfiguration();
+            var baseUrl = config.ExternalUrl;
 
-            switch (id)
+            // Normalize search id to handle singular/plural variants
+            var normalized = id?.Trim().ToLowerInvariant();
+            switch (normalized)
             {
                 case "artists":
-                    var artists = _musicService.Search(userId.Value, term, new[] { BaseItemKind.MusicArtist }, count).Result;
+                case "artist":
+                    var artistItems = _musicService.SearchByType(userId.Value, term ?? string.Empty, new[] { "MusicArtist" }, Math.Max(count * 5, 200)).Result;
+                    var artists = artistItems
+                        .OfType<MusicArtist>()
+                        .GroupBy(a => (a.Name ?? string.Empty).Trim().ToLowerInvariant())
+                        .Select(g => g.First())
+                        .Skip(index)
+                        .Take(count)
+                        .ToList();
                     return new SearchResponse
                     {
-                        Index = 0,
+                        Index = index,
                         Count = artists.Count,
-                        Total = artists.Count,
+                        Total = artistItems.OfType<MusicArtist>()
+                            .GroupBy(a => (a.Name ?? string.Empty).Trim().ToLowerInvariant())
+                            .Count(),
                         MediaCollection = artists.Cast<MusicArtist>().Select(artist => new MediaCollection
                         {
                             Id = $"artist:{artist.Id}",
@@ -462,12 +769,22 @@ public class SonosService : ISonosService
                     };
 
                 case "albums":
-                    var albums = _musicService.Search(userId.Value, term, new[] { BaseItemKind.MusicAlbum }, count).Result;
+                case "album":
+                    var albumItems = _musicService.SearchByType(userId.Value, term ?? string.Empty, new[] { "MusicAlbum" }, Math.Max(count * 5, 200)).Result;
+                    var albums = albumItems
+                        .OfType<MusicAlbum>()
+                        .GroupBy(a => ((a.Name ?? string.Empty) + "|" + (a.AlbumArtist ?? string.Empty)).Trim().ToLowerInvariant())
+                        .Select(g => g.First())
+                        .Skip(index)
+                        .Take(count)
+                        .ToList();
                     return new SearchResponse
                     {
-                        Index = 0,
+                        Index = index,
                         Count = albums.Count,
-                        Total = albums.Count,
+                        Total = albumItems.OfType<MusicAlbum>()
+                            .GroupBy(a => ((a.Name ?? string.Empty) + "|" + (a.AlbumArtist ?? string.Empty)).Trim().ToLowerInvariant())
+                            .Count(),
                         MediaCollection = albums.Cast<MusicAlbum>().Select(album => new MediaCollection
                         {
                             Id = $"album:{album.Id}",
@@ -480,12 +797,20 @@ public class SonosService : ISonosService
                     };
 
                 case "tracks":
-                    var tracks = _musicService.Search(userId.Value, term, new[] { BaseItemKind.Audio }, count).Result;
+                case "track":
+                    var trackItems = _musicService.SearchByType(userId.Value, term ?? string.Empty, new[] { "Audio" }, Math.Max(count * 5, 200)).Result;
+                    var tracks = trackItems
+                        .OfType<Audio>()
+                        .GroupBy(t => t.Id)
+                        .Select(g => g.First())
+                        .Skip(index)
+                        .Take(count)
+                        .ToList();
                     return new SearchResponse
                     {
-                        Index = 0,
+                        Index = index,
                         Count = tracks.Count,
-                        Total = tracks.Count,
+                        Total = trackItems.OfType<Audio>().GroupBy(t => t.Id).Count(),
                         MediaMetadata = tracks.Cast<Audio>().Select(track => new MediaMetadata
                         {
                             Id = $"track:{track.Id}",

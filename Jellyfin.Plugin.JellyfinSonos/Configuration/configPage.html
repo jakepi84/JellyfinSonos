@@ -2,117 +2,95 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>Jellyfin Sonos Configuration</title>
+    <title>Jellyfin Sonos</title>
 </head>
 <body>
-    <div id="JellyfinSonosConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
-        <div data-role="content">
-            <div class="content-primary">
-                <form id="JellyfinSonosConfigForm">
-                    <div class="verticalSection">
-                        <h2>Jellyfin Sonos Configuration</h2>
-                        <p>Configure your Jellyfin server to work as a music source in the Sonos app.</p>
+<div data-role="page" class="page type-interior pluginConfigurationPage esqConfigurationPage">
+    <div data-role="content">
+        <div class="content-primary">
+            <form class="esqConfigurationForm">
+                <div class="verticalSection verticalSection-extrabottompadding">
+                    <div class="sectionTitleContainer flex align-items-center">
+                        <h2 class="sectionTitle">Jellyfin Sonos Settings</h2>
                     </div>
-                    
-                    <div class="verticalSection">
+                    <div class="verticalSection verticalSection-extrabottompadding">
                         <div class="inputContainer">
-                            <label class="inputLabel inputLabelUnfocused" for="serviceName">Service Name:</label>
-                            <input id="serviceName" name="serviceName" type="text" is="emby-input" class="emby-input" />
-                            <div class="fieldDescription">The name displayed in your Sonos app (default: Jellyfin)</div>
+                            <input is="emby-input" type="text" id="txtServiceName" label="Service Name:" />
+                            <div class="fieldDescription">The name displayed in your Sonos app.</div>
                         </div>
                     </div>
-
-                    <div class="verticalSection">
+                    <div class="verticalSection verticalSection-extrabottompadding">
                         <div class="inputContainer">
-                            <label class="inputLabel inputLabelUnfocused" for="serviceId">Service ID:</label>
-                            <input id="serviceId" name="serviceId" type="number" is="emby-input" class="emby-input" />
-                            <div class="fieldDescription">Unique service ID (default: 247, must be unique across all Sonos services you use)</div>
+                            <input is="emby-input" type="number" id="txtServiceId" label="Service ID:" />
+                            <div class="fieldDescription">Unique service ID (default: 247).</div>
                         </div>
                     </div>
-
-                    <div class="verticalSection">
+                    <div class="verticalSection verticalSection-extrabottompadding">
                         <div class="inputContainer">
-                            <label class="inputLabel inputLabelUnfocused" for="externalUrl">External URL:</label>
-                            <input id="externalUrl" name="externalUrl" type="text" is="emby-input" class="emby-input" />
-                            <div class="fieldDescription">The external URL for your Jellyfin server (e.g., https://jellyfin.example.com). This MUST be accessible from your Sonos devices.</div>
+                            <input is="emby-input" type="text" id="txtExternalUrl" label="External URL:" />
+                            <div class="fieldDescription">The external URL for your Jellyfin server (e.g., https://jellyfin.jakepi.net).</div>
                         </div>
                     </div>
-
-                    <div class="verticalSection">
+                    <div class="verticalSection verticalSection-extrabottompadding">
                         <div class="inputContainer">
-                            <label class="inputLabel inputLabelUnfocused" for="secretKey">Secret Key:</label>
-                            <input id="secretKey" name="secretKey" type="password" is="emby-input" class="emby-input" />
-                            <div class="fieldDescription">Secret key used to sign OAuth tokens (generate a secure random string, 32+ characters recommended)</div>
+                            <input is="emby-input" type="password" id="txtSecretKey" label="Secret Key:" autocomplete="current-password" />
+                            <div class="fieldDescription">Secret key used to sign OAuth tokens (generate a random 32+ character string).</div>
                         </div>
                     </div>
-
-                    <div class="verticalSection">
-                        <h3>Setup Instructions</h3>
-                        <ol>
-                            <li>Fill in the configuration above and save</li>
-                            <li>Register your Jellyfin server with the Sonos Developer Portal</li>
-                            <li>Use the following endpoints:
-                                <ul>
-                                    <li>SMAPI: <code id="smapiEndpoint"></code></li>
-                                    <li>OAuth authorize: <code id="oauthAuthorize"></code></li>
-                                    <li>OAuth token: <code id="oauthToken"></code></li>
-                                </ul>
-                            </li>
-                            <li>In Sonos, choose OAuth authentication and supply the URLs above</li>
-                            <li>Once approved, add the service in your Sonos app</li>
-                        </ol>
-                    </div>
-
                     <div>
-                        <button is="emby-button" type="submit" class="raised button-submit block">
-                            <span>Save</span>
+                        <button is="emby-button" type="submit" data-theme="b" class="raised button-submit block">
+                            <span>${Save}</span>
+                        </button>
+                        <button is="emby-button" type="button" class="raised button-cancel block btnCancel" onclick="history.back();">
+                            <span>${ButtonCancel}</span>
                         </button>
                     </div>
-                </form>
-            </div>
+                </div>
+            </form>
         </div>
     </div>
 
     <script type="text/javascript">
-        var JellyfinSonosConfig = {
-            pluginUniqueId: 'a8c8f6d4-3b2e-4f1a-9c7d-8e5f6a7b8c9d'
+        var JellyfinSonosConfigurationPage = {
+            pluginUniqueId: "a8c8f6d4-3b2e-4f1a-9c7d-8e5f6a7b8c9d",
+
+            txtServiceName: document.querySelector("#txtServiceName"),
+            txtServiceId: document.querySelector("#txtServiceId"),
+            txtExternalUrl: document.querySelector("#txtExternalUrl"),
+            txtSecretKey: document.querySelector("#txtSecretKey")
         };
 
-        document.getElementById('JellyfinSonosConfigPage').addEventListener('pageshow', function () {
+        window.addEventListener("pageshow", function (_) {
             Dashboard.showLoadingMsg();
-            ApiClient.getPluginConfiguration(JellyfinSonosConfig.pluginUniqueId).then(function (config) {
-                document.getElementById('serviceName').value = config.ServiceName || 'Jellyfin';
-                document.getElementById('serviceId').value = config.ServiceId || 247;
-                document.getElementById('externalUrl').value = config.ExternalUrl || '';
-                document.getElementById('secretKey').value = config.SecretKey || '';
-                
-                // Update SMAPI endpoint display
-                var baseUrl = config.ExternalUrl || window.location.origin;
-                document.getElementById('smapiEndpoint').textContent = baseUrl + '/sonos/smapi';
-                document.getElementById('oauthAuthorize').textContent = baseUrl + '/sonos/oauth/authorize';
-                document.getElementById('oauthToken').textContent = baseUrl + '/sonos/oauth/token';
-                
+            console.log('[JellyfinSonos] pageshow');
+            window.ApiClient.getPluginConfiguration(JellyfinSonosConfigurationPage.pluginUniqueId).then(function (config) {
+                console.log('[JellyfinSonos] config loaded:', config);
+                JellyfinSonosConfigurationPage.txtServiceName.value = config.ServiceName || "Jellyfin";
+                JellyfinSonosConfigurationPage.txtServiceId.value = config.ServiceId || "247";
+                JellyfinSonosConfigurationPage.txtExternalUrl.value = config.ExternalUrl || "";
+                JellyfinSonosConfigurationPage.txtSecretKey.value = config.SecretKey || "";
                 Dashboard.hideLoadingMsg();
             });
         });
 
-        document.getElementById('JellyfinSonosConfigForm').addEventListener('submit', function (e) {
+        document.querySelector(".esqConfigurationForm").addEventListener("submit", function(e){
             e.preventDefault();
             Dashboard.showLoadingMsg();
-            
-            ApiClient.getPluginConfiguration(JellyfinSonosConfig.pluginUniqueId).then(function (config) {
-                config.ServiceName = document.getElementById('serviceName').value;
-                config.ServiceId = parseInt(document.getElementById('serviceId').value);
-                config.ExternalUrl = document.getElementById('externalUrl').value;
-                config.SecretKey = document.getElementById('secretKey').value;
-                
-                ApiClient.updatePluginConfiguration(JellyfinSonosConfig.pluginUniqueId, config).then(function () {
-                    Dashboard.processPluginConfigurationUpdateResult();
-                });
+            console.log('[JellyfinSonos] submit');
+
+            window.ApiClient.getPluginConfiguration(JellyfinSonosConfigurationPage.pluginUniqueId).then(function (config) {
+                config.ServiceName = JellyfinSonosConfigurationPage.txtServiceName.value || "Jellyfin";
+                config.ServiceId = parseInt(JellyfinSonosConfigurationPage.txtServiceId.value) || 247;
+                config.ExternalUrl = JellyfinSonosConfigurationPage.txtExternalUrl.value || "";
+                config.SecretKey = JellyfinSonosConfigurationPage.txtSecretKey.value || "";
+                console.log('[JellyfinSonos] updating config:', config);
+                window.ApiClient.updatePluginConfiguration(JellyfinSonosConfigurationPage.pluginUniqueId, config).then(Dashboard.processPluginConfigurationUpdateResult);
             });
-            
+
+            // Disable default form submission
             return false;
         });
     </script>
+</div>
 </body>
 </html>

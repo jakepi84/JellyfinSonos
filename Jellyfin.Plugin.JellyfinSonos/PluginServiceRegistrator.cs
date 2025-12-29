@@ -13,7 +13,11 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     /// <inheritdoc />
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
+        // Register configuration provider - this will always return the latest configuration from the plugin
+        serviceCollection.AddSingleton<IConfigurationProvider, ConfigurationProvider>();
+
         // Register services as singletons
+        serviceCollection.AddSingleton<LinkCodeService>();
         serviceCollection.AddSingleton<OAuthService>();
         serviceCollection.AddSingleton<JellyfinMusicService>();
         serviceCollection.AddSingleton<SonosService>();

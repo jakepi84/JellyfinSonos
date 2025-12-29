@@ -1,56 +1,77 @@
 using System;
 using System.Collections.Concurrent;
-using System.Security.Cryptography;
 
 namespace Jellyfin.Plugin.JellyfinSonos.Services;
 
 /// <summary>
-/// Service for managing link codes used in device authorization.
+/// Association between link code and user authentication.
+/// </summary>
+public class LinkCodeAssociation
+{
+    /// <summary>
+    /// Gets or sets the auth token (bearer token for SMAPI calls).
+    /// </summary>
+    public string AuthToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the user ID.
+    /// </summary>
+    public Guid UserId { get; set; }
+
+    /// <summary>
+    /// Gets or sets the username.
+    /// </summary>
+    public string Username { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets when this association was created.
+    /// </summary>
+    public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Manages Sonos AppLink link codes.
+/// Generates unique link codes, associates them with user auth tokens,
+/// and provides retrieval for getDeviceAuthToken flow.
 /// </summary>
 public class LinkCodeService
 {
-    private readonly ConcurrentDictionary<string, LinkCodeData> _linkCodes = new();
-    private readonly TimeSpan _expirationTime = TimeSpan.FromMinutes(10);
+    private readonly ConcurrentDictionary<string, LinkCodeAssociation?> _linkCodes = new();
+    private readonly TimeSpan _expirationTime = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// Generates a new link code.
+    /// Generates a new unique link code.
     /// </summary>
-    /// <returns>The generated link code.</returns>
+    /// <returns>A unique link code string.</returns>
     public string GenerateLinkCode()
     {
-        var linkCode = GenerateRandomCode(8);
-        var data = new LinkCodeData
-        {
-            CreatedAt = DateTime.UtcNow,
-            IsUsed = false
-        };
-        _linkCodes.TryAdd(linkCode, data);
-        
-        // Clean up expired codes
+        var linkCode = GenerateRandomString(16);
+        _linkCodes.TryAdd(linkCode, null);
         CleanupExpiredCodes();
-        
         return linkCode;
     }
 
     /// <summary>
-    /// Sets credentials for a link code.
+    /// Checks if a link code exists and is valid.
     /// </summary>
     /// <param name="linkCode">The link code.</param>
-    /// <param name="username">The username.</param>
-    /// <param name="password">The password.</param>
-    /// <returns>True if successful.</returns>
-    public bool SetCredentials(string linkCode, string username, string password)
+    /// <returns>True if valid.</returns>
+    public bool IsValid(string linkCode)
     {
-        if (_linkCodes.TryGetValue(linkCode, out var data))
+        if (string.IsNullOrWhiteSpace(linkCode))
         {
-            if (DateTime.UtcNow - data.CreatedAt > _expirationTime)
+            return false;
+        }
+
+        if (_linkCodes.TryGetValue(linkCode, out var association))
+        {
+            // Check if expired
+            if (association != null && DateTime.UtcNow - association.CreatedAt > _expirationTime)
             {
                 _linkCodes.TryRemove(linkCode, out _);
                 return false;
             }
 
-            data.Username = username;
-            data.Password = password;
             return true;
         }
 
@@ -58,28 +79,40 @@ public class LinkCodeService
     }
 
     /// <summary>
-    /// Gets credentials for a link code and marks it as used.
+    /// Associates a link code with user authentication information.
     /// </summary>
     /// <param name="linkCode">The link code.</param>
-    /// <returns>Credentials if found and valid.</returns>
-    public (string Username, string Password)? GetCredentials(string linkCode)
+    /// <param name="association">The user association.</param>
+    /// <returns>True if successful.</returns>
+    public bool Associate(string linkCode, LinkCodeAssociation association)
     {
-        if (_linkCodes.TryGetValue(linkCode, out var data))
+        if (!IsValid(linkCode))
         {
-            if (DateTime.UtcNow - data.CreatedAt > _expirationTime)
+            return false;
+        }
+
+        association.CreatedAt = DateTime.UtcNow;
+        _linkCodes[linkCode] = association;
+        return true;
+    }
+
+    /// <summary>
+    /// Gets the association for a link code.
+    /// </summary>
+    /// <param name="linkCode">The link code.</param>
+    /// <returns>The association or null.</returns>
+    public LinkCodeAssociation? GetAssociation(string linkCode)
+    {
+        if (_linkCodes.TryGetValue(linkCode, out var association))
+        {
+            // Check if expired
+            if (association != null && DateTime.UtcNow - association.CreatedAt > _expirationTime)
             {
                 _linkCodes.TryRemove(linkCode, out _);
                 return null;
             }
 
-            if (string.IsNullOrEmpty(data.Username) || string.IsNullOrEmpty(data.Password))
-            {
-                return null;
-            }
-
-            data.IsUsed = true;
-            _linkCodes.TryRemove(linkCode, out _); // Remove after use
-            return (data.Username, data.Password);
+            return association;
         }
 
         return null;
@@ -87,37 +120,26 @@ public class LinkCodeService
 
     private void CleanupExpiredCodes()
     {
-        var now = DateTime.UtcNow;
-        var expiredCodes = _linkCodes
-            .Where(kvp => now - kvp.Value.CreatedAt > _expirationTime)
-            .Select(kvp => kvp.Key)
-            .ToList();
-
-        foreach (var code in expiredCodes)
+        var cutoff = DateTime.UtcNow.Add(-_expirationTime);
+        foreach (var kvp in _linkCodes)
         {
-            _linkCodes.TryRemove(code, out _);
+            if (kvp.Value != null && kvp.Value.CreatedAt < cutoff)
+            {
+                _linkCodes.TryRemove(kvp.Key, out _);
+            }
         }
     }
 
-    private static string GenerateRandomCode(int length)
+    private static string GenerateRandomString(int length)
     {
         const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        var random = RandomNumberGenerator.GetBytes(length);
+        var random = new Random();
         var result = new char[length];
-        
         for (int i = 0; i < length; i++)
         {
-            result[i] = chars[random[i] % chars.Length];
+            result[i] = chars[random.Next(chars.Length)];
         }
-        
-        return new string(result);
-    }
 
-    private class LinkCodeData
-    {
-        public DateTime CreatedAt { get; set; }
-        public bool IsUsed { get; set; }
-        public string Username { get; set; } = string.Empty;
-        public string Password { get; set; } = string.Empty;
+        return new string(result);
     }
 }

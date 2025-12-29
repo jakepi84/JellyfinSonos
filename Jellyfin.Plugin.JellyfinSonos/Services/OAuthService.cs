@@ -14,20 +14,22 @@ namespace Jellyfin.Plugin.JellyfinSonos.Services;
 /// </summary>
 public class OAuthService
 {
-    private const int AccessTokenMinutes = 60;
+    private const int AccessTokenMinutes = 43200; // 30 days
     private const int AuthorizationCodeMinutes = 10;
     private const int RefreshTokenDays = 30;
 
     private readonly ConcurrentDictionary<string, AuthCode> _authCodes = new();
     private readonly ConcurrentDictionary<string, RefreshTokenInfo> _refreshTokens = new();
     private readonly ILogger<OAuthService> _logger;
+    private readonly IConfigurationProvider _configProvider;
 
-    public OAuthService(ILogger<OAuthService> logger)
+    public OAuthService(IConfigurationProvider configProvider, ILogger<OAuthService> logger)
     {
+        _configProvider = configProvider;
         _logger = logger;
     }
 
-    private PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
+    private PluginConfiguration Config => _configProvider.GetConfiguration();
 
     /// <summary>
     /// Create a short-lived authorization code bound to the client and redirect URI.

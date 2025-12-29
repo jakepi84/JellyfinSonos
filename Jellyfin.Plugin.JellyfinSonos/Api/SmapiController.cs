@@ -61,6 +61,34 @@ public class SmapiController : ControllerBase
 
             // Prefer HTTP Authorization bearer over SOAP headers for OAuth flows
             var authToken = ExtractBearerToken() ?? ExtractAuthToken(doc, nsmgr);
+            if (string.IsNullOrWhiteSpace(authToken))
+            {
+                _logger.LogDebug("No auth token found in request");
+            }
+            else
+            {
+                _logger.LogDebug("Auth token found (length: {Length})", authToken.Length);
+                // Log decoded payload (no signature) to confirm userId/exp
+                var payload = DecodeTokenPayload(authToken);
+                if (!string.IsNullOrEmpty(payload))
+                {
+                    var logged = payload.Length > 500 ? payload.Substring(0, 500) + "...<truncated>" : payload;
+                    _logger.LogTrace("Auth token payload: {Payload}", logged);
+                }
+            }
+
+            // Log SOAP header (trimmed) to see what Sonos sends
+            var headerNode = doc.SelectSingleNode("//soap:Header", nsmgr);
+            if (headerNode != null)
+            {
+                var headerXml = headerNode.OuterXml;
+                const int maxHeaderLog = 1200;
+                if (headerXml.Length > maxHeaderLog)
+                {
+                    headerXml = headerXml.Substring(0, maxHeaderLog) + "...<truncated>";
+                }
+                _logger.LogTrace("SOAP Header: {HeaderXml}", headerXml);
+            }
 
             // Extract the method name
             var bodyNode = doc.SelectSingleNode("//soap:Body", nsmgr);
@@ -75,6 +103,10 @@ public class SmapiController : ControllerBase
             string response;
             switch (methodName)
             {
+                case "getLastUpdate":
+                    // Basic implementation returning stable tokens and a poll interval
+                    response = BuildSoapResponse("getLastUpdateResponse", SerializeGetLastUpdate());
+                    break;
                 case "getAppLink":
                     var householdId = GetElementValue(doc, "householdId", nsmgr);
                     var appLinkResult = _sonosService.GetAppLink(householdId);
@@ -82,16 +114,32 @@ public class SmapiController : ControllerBase
                     break;
 
                 case "getDeviceAuthToken":
-                    response = BuildSoapFault("Client", "OAuth is used for this service. Tokens are issued via /sonos/oauth/token.");
+                    var linkCode = GetElementValue(doc, "linkCode", nsmgr);
+                    try
+                    {
+                        var deviceAuthResult = _sonosService.GetDeviceAuthToken(linkCode);
+                        response = BuildSoapResponse("getDeviceAuthTokenResponse", SerializeGetDeviceAuthToken(deviceAuthResult));
+                    }
+                    catch (Services.SoapFaultException soapEx)
+                    {
+                        response = BuildSoapFault(soapEx.FaultCode, soapEx.FaultString, soapEx.ExceptionInfo, soapEx.SonosError);
+                    }
                     break;
 
                 case "getMetadata":
                     var id = GetElementValue(doc, "id", nsmgr) ?? "root";
                     var index = int.Parse(GetElementValue(doc, "index", nsmgr) ?? "0");
                     var count = int.Parse(GetElementValue(doc, "count", nsmgr) ?? "100");
-                    var recursive = bool.Parse(GetElementValue(doc, "recursive", nsmgr) ?? "false");
+                    var recursiveText = GetElementValue(doc, "recursive", nsmgr);
+                    var recursive = bool.TryParse(recursiveText, out var parsedRecursive) ? parsedRecursive : false;
+                    _logger.LogInformation("getMetadata inputs: id={Id}, index={Index}, count={Count}, recursive={Recursive}, authTokenLen={AuthLen}", id, index, count, recursive, authToken?.Length ?? 0);
                     var metadataResult = _sonosService.GetMetadata(id, index, count, recursive, authToken);
                     response = BuildSoapResponse("getMetadataResponse", SerializeGetMetadata(metadataResult));
+                    break;
+
+                case "getExtendedMetadata":
+                    // Minimal empty response to satisfy Sonos calls; extend as needed
+                    response = BuildSoapResponse("getExtendedMetadataResponse", "<ns:getExtendedMetadataResult></ns:getExtendedMetadataResult>");
                     break;
 
                 case "getMediaMetadata":
@@ -184,6 +232,41 @@ public class SmapiController : ControllerBase
             : null;
     }
 
+    private static string? DecodeTokenPayload(string token)
+    {
+        var parts = token.Split('.');
+        if (parts.Length < 1)
+        {
+            return null;
+        }
+
+        try
+        {
+            var payloadBytes = Base64UrlDecode(parts[0]);
+            return System.Text.Encoding.UTF8.GetString(payloadBytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static byte[] Base64UrlDecode(string input)
+    {
+        var normalized = input.Replace('-', '+').Replace('_', '/');
+        switch (normalized.Length % 4)
+        {
+            case 2:
+                normalized += "==";
+                break;
+            case 3:
+                normalized += "=";
+                break;
+        }
+
+        return Convert.FromBase64String(normalized);
+    }
+
     private static string BuildSoapResponse(string methodName, string body)
     {
         return $@"<?xml version=""1.0"" encoding=""utf-8""?>
@@ -207,6 +290,39 @@ public class SmapiController : ControllerBase
         </soap:Fault>
     </soap:Body>
 </soap:Envelope>";
+    }
+
+    private static string BuildSoapFault(string faultCode, string faultString, string exceptionInfo, int sonosError)
+    {
+        return $@"<?xml version=""1.0"" encoding=""utf-8""?>
+<soap:Envelope xmlns:soap=""http://schemas.xmlsoap.org/soap/envelope/"" xmlns:ns=""http://www.sonos.com/Services/1.1"">
+    <soap:Body>
+        <soap:Fault>
+            <faultcode>{System.Security.SecurityElement.Escape(faultCode)}</faultcode>
+            <faultstring>{System.Security.SecurityElement.Escape(faultString)}</faultstring>
+            <detail>
+                <ns:ExceptionInfo>{System.Security.SecurityElement.Escape(exceptionInfo)}</ns:ExceptionInfo>
+                <ns:SonosError>{sonosError}</ns:SonosError>
+            </detail>
+        </soap:Fault>
+    </soap:Body>
+</soap:Envelope>";
+    }
+
+    private static string SerializeGetLastUpdate()
+    {
+        // Return stable tokens; update these when catalog or user favorites change
+        var favoritesToken = "favorites-1";
+        var catalogToken = "catalog-1";
+        var pollIntervalSeconds = 120;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("<ns:getLastUpdateResult>");
+        sb.AppendLine($"    <ns:favorites>{System.Security.SecurityElement.Escape(favoritesToken)}</ns:favorites>");
+        sb.AppendLine($"    <ns:catalog>{System.Security.SecurityElement.Escape(catalogToken)}</ns:catalog>");
+        sb.AppendLine($"    <ns:pollInterval>{pollIntervalSeconds}</ns:pollInterval>");
+        sb.AppendLine("</ns:getLastUpdateResult>");
+        return sb.ToString();
     }
 
     private static string SerializeGetMetadata(GetMetadataResponse response)
@@ -235,6 +351,40 @@ public class SmapiController : ControllerBase
                 }
                 sb.AppendLine($"        <ns:canPlay>{collection.CanPlay.ToString().ToLower()}</ns:canPlay>");
                 sb.AppendLine($"    </ns:mediaCollection>");
+            }
+        }
+
+        if (response.MediaMetadata != null)
+        {
+            foreach (var meta in response.MediaMetadata)
+            {
+                sb.AppendLine($"    <ns:mediaMetadata>");
+                sb.AppendLine($"        <ns:id>{System.Security.SecurityElement.Escape(meta.Id)}</ns:id>");
+                sb.AppendLine($"        <ns:title>{System.Security.SecurityElement.Escape(meta.Title)}</ns:title>");
+                sb.AppendLine($"        <ns:mimeType>{meta.MimeType}</ns:mimeType>");
+                sb.AppendLine($"        <ns:itemType>{meta.ItemType}</ns:itemType>");
+                if (meta.TrackNumber.HasValue)
+                {
+                    sb.AppendLine($"        <ns:trackNumber>{meta.TrackNumber.Value}</ns:trackNumber>");
+                }
+                if (!string.IsNullOrEmpty(meta.Artist))
+                {
+                    sb.AppendLine($"        <ns:artist>{System.Security.SecurityElement.Escape(meta.Artist)}</ns:artist>");
+                }
+                if (!string.IsNullOrEmpty(meta.Album))
+                {
+                    sb.AppendLine($"        <ns:album>{System.Security.SecurityElement.Escape(meta.Album)}</ns:album>");
+                }
+                if (!string.IsNullOrEmpty(meta.AlbumArtURI))
+                {
+                    sb.AppendLine($"        <ns:albumArtURI>{System.Security.SecurityElement.Escape(meta.AlbumArtURI)}</ns:albumArtURI>");
+                }
+                if (meta.Duration.HasValue)
+                {
+                    sb.AppendLine($"        <ns:duration>{meta.Duration.Value}</ns:duration>");
+                }
+                sb.AppendLine($"        <ns:canPlay>{meta.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                sb.AppendLine($"    </ns:mediaMetadata>");
             }
         }
 
@@ -297,6 +447,23 @@ public class SmapiController : ControllerBase
         </ns:getAppLinkResult>";
     }
 
+    private static string SerializeGetDeviceAuthToken(GetDeviceAuthTokenResponse response)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("<ns:getDeviceAuthTokenResult>");
+        sb.AppendLine($"    <ns:authToken>{System.Security.SecurityElement.Escape(response.AuthToken)}</ns:authToken>");
+        if (!string.IsNullOrWhiteSpace(response.PrivateKey))
+        {
+            sb.AppendLine($"    <ns:privateKey>{System.Security.SecurityElement.Escape(response.PrivateKey)}</ns:privateKey>");
+        }
+        sb.AppendLine("    <ns:userInfo>");
+        sb.AppendLine($"        <ns:nickname>{System.Security.SecurityElement.Escape(response.UserInfo?.Nickname ?? string.Empty)}</ns:nickname>");
+        sb.AppendLine($"        <ns:userIdHashCode>{System.Security.SecurityElement.Escape(response.UserInfo?.UserIdHashCode ?? string.Empty)}</ns:userIdHashCode>");
+        sb.AppendLine("    </ns:userInfo>");
+        sb.AppendLine("</ns:getDeviceAuthTokenResult>");
+        return sb.ToString();
+    }
+
     private static string SerializeSearch(SearchResponse response)
     {
         var sb = new StringBuilder();
@@ -304,6 +471,60 @@ public class SmapiController : ControllerBase
         sb.AppendLine($"    <ns:index>{response.Index}</ns:index>");
         sb.AppendLine($"    <ns:count>{response.Count}</ns:count>");
         sb.AppendLine($"    <ns:total>{response.Total}</ns:total>");
+
+        if (response.MediaCollection != null)
+        {
+            foreach (var collection in response.MediaCollection)
+            {
+                sb.AppendLine($"    <ns:mediaCollection>");
+                sb.AppendLine($"        <ns:id>{System.Security.SecurityElement.Escape(collection.Id)}</ns:id>");
+                sb.AppendLine($"        <ns:title>{System.Security.SecurityElement.Escape(collection.Title)}</ns:title>");
+                sb.AppendLine($"        <ns:itemType>{collection.ItemType}</ns:itemType>");
+                if (!string.IsNullOrEmpty(collection.Artist))
+                {
+                    sb.AppendLine($"        <ns:artist>{System.Security.SecurityElement.Escape(collection.Artist)}</ns:artist>");
+                }
+                if (!string.IsNullOrEmpty(collection.AlbumArtURI))
+                {
+                    sb.AppendLine($"        <ns:albumArtURI>{System.Security.SecurityElement.Escape(collection.AlbumArtURI)}</ns:albumArtURI>");
+                }
+                sb.AppendLine($"        <ns:canPlay>{collection.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                sb.AppendLine($"    </ns:mediaCollection>");
+            }
+        }
+        if (response.MediaMetadata != null)
+        {
+            foreach (var meta in response.MediaMetadata)
+            {
+                sb.AppendLine($"    <ns:mediaMetadata>");
+                sb.AppendLine($"        <ns:id>{System.Security.SecurityElement.Escape(meta.Id)}</ns:id>");
+                sb.AppendLine($"        <ns:title>{System.Security.SecurityElement.Escape(meta.Title)}</ns:title>");
+                sb.AppendLine($"        <ns:mimeType>{meta.MimeType}</ns:mimeType>");
+                sb.AppendLine($"        <ns:itemType>{meta.ItemType}</ns:itemType>");
+                if (meta.TrackNumber.HasValue)
+                {
+                    sb.AppendLine($"        <ns:trackNumber>{meta.TrackNumber.Value}</ns:trackNumber>");
+                }
+                if (!string.IsNullOrEmpty(meta.Artist))
+                {
+                    sb.AppendLine($"        <ns:artist>{System.Security.SecurityElement.Escape(meta.Artist)}</ns:artist>");
+                }
+                if (!string.IsNullOrEmpty(meta.Album))
+                {
+                    sb.AppendLine($"        <ns:album>{System.Security.SecurityElement.Escape(meta.Album)}</ns:album>");
+                }
+                if (!string.IsNullOrEmpty(meta.AlbumArtURI))
+                {
+                    sb.AppendLine($"        <ns:albumArtURI>{System.Security.SecurityElement.Escape(meta.AlbumArtURI)}</ns:albumArtURI>");
+                }
+                if (meta.Duration.HasValue)
+                {
+                    sb.AppendLine($"        <ns:duration>{meta.Duration.Value}</ns:duration>");
+                }
+                sb.AppendLine($"        <ns:canPlay>{meta.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                sb.AppendLine($"    </ns:mediaMetadata>");
+            }
+        }
         sb.AppendLine($"</ns:searchResult>");
         return sb.ToString();
     }
