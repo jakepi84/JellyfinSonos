@@ -284,32 +284,28 @@ public class SonosService : ISonosService
                             Id = "artists",
                             Title = "Artists",
                             ItemType = "container",
-                            CanPlay = false,
-                            CanPlayContainer = true
+                            CanPlay = false
                         },
                         new MediaCollection
                         {
                             Id = "albums",
                             Title = "Albums",
                             ItemType = "albumList",
-                            CanPlay = false,
-                            CanPlayContainer = true
+                            CanPlay = false
                         },
                         new MediaCollection
                         {
                             Id = "playlists",
                             Title = "Playlists",
                             ItemType = "container",
-                            CanPlay = false,
-                            CanPlayContainer = true
+                            CanPlay = false
                         },
                         new MediaCollection
                         {
                             Id = "search",
                             Title = "Search",
                             ItemType = "search",
-                            CanPlay = false,
-                            CanPlayContainer = true
+                            CanPlay = false
                         }
                     }
                 };
@@ -347,9 +343,9 @@ public class SonosService : ISonosService
                         Total = 3,
                         MediaCollection = new List<MediaCollection>
                         {
-                            new MediaCollection { Id = "artists", Title = "Artists", ItemType = "collection", CanPlay = false, CanPlayContainer = true },
-                            new MediaCollection { Id = "albums", Title = "Albums", ItemType = "collection", CanPlay = false, CanPlayContainer = true },
-                            new MediaCollection { Id = "tracks", Title = "Tracks", ItemType = "collection", CanPlay = false, CanPlayContainer = true }
+                            new MediaCollection { Id = "artists", Title = "Artists", ItemType = "collection", CanPlay = false },
+                            new MediaCollection { Id = "albums", Title = "Albums", ItemType = "collection", CanPlay = false },
+                            new MediaCollection { Id = "tracks", Title = "Tracks", ItemType = "collection", CanPlay = false }
                         }
                     };
 
@@ -402,8 +398,7 @@ public class SonosService : ISonosService
                 Title = artist.Name,
                 ItemType = "artist",
                 AlbumArtURI = GetImageUrl(baseUrl, artist.Id),
-                CanPlay = false,  // Artists are containers, NOT directly playable
-                CanPlayContainer = true  // But they ARE browsable containers
+                CanPlay = false
             }).ToList()
         };
     }
@@ -426,8 +421,7 @@ public class SonosService : ISonosService
                 ItemType = "album",
                 Artist = album.AlbumArtist,
                 AlbumArtURI = GetImageUrl(baseUrl, album.Id),
-                CanPlay = true,  // Albums ARE playable - user can "Play" all tracks in the album
-                CanPlayContainer = true  // Albums contain playable tracks
+                CanPlay = true
             }).ToList()
         };
     }
@@ -446,8 +440,7 @@ public class SonosService : ISonosService
             Title = playlist.Name,
             ItemType = "playlist",
             AlbumArtURI = GetImageUrl(baseUrl, playlist.Id),
-            CanPlay = true,  // Playlists ARE playable - user can "Play" all tracks in the playlist
-            CanPlayContainer = true  // Playlists contain playable tracks
+            CanPlay = true
         }).ToList();
         
         _logger.LogInformation("Returning {Count} playlist collections", mediaCollections.Count);
@@ -478,8 +471,7 @@ public class SonosService : ISonosService
                 ItemType = "album",
                 Artist = album.AlbumArtist,
                 AlbumArtURI = GetImageUrl(baseUrl, album.Id),
-                CanPlay = true,
-                CanPlayContainer = true
+                CanPlay = true
             }).ToList()
         };
     }
@@ -500,18 +492,14 @@ public class SonosService : ISonosService
                 Id = $"track:{track.Id}",
                 Title = track.Name,
                 ItemType = "track",
-                MimeType = GetMimeType(track.Path),
-                TrackMetadata = new TrackMetadata
-                {
-                    Artist = track.AlbumArtists?.FirstOrDefault(),
-                    Album = track.Album,
-                    Duration = track.RunTimeTicks.HasValue ? (int)(track.RunTimeTicks.Value / 10000000) : 0,
-                    AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
-                    TrackNumber = track.IndexNumber,
-                    CanPlay = true,
-                    CanSkip = true,
-                    CanAddToFavorites = true
-                }
+                MimeType = "audio/mpeg", // Always MP3 since we force transcoding in GetMediaURI
+                TrackNumber = track.IndexNumber,
+                Artist = track.AlbumArtists?.FirstOrDefault(),
+                Album = track.Album,
+                AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
+                Duration = track.RunTimeTicks.HasValue ? (int)(track.RunTimeTicks.Value / 10000000) : 0, // Convert ticks to seconds
+                CanPlay = true,
+                CanStream = true
             }).ToList()
         };
     }
@@ -529,18 +517,14 @@ public class SonosService : ISonosService
             Id = $"track:{track.Id}",
             Title = track.Name,
             ItemType = "track",
-            MimeType = GetMimeType(track.Path),
-            TrackMetadata = new TrackMetadata
-            {
-                Artist = track.AlbumArtists?.FirstOrDefault(),
-                Album = track.Album,
-                Duration = track.RunTimeTicks.HasValue ? (int)(track.RunTimeTicks.Value / 10000000) : 0,
-                AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
-                TrackNumber = track.IndexNumber,
-                CanPlay = true,
-                CanSkip = true,
-                CanAddToFavorites = true
-            }
+            MimeType = "audio/mpeg", // Always MP3 since we force transcoding in GetMediaURI
+            TrackNumber = track.IndexNumber,
+            Artist = track.AlbumArtists?.FirstOrDefault(),
+            Album = track.Album,
+            AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
+            Duration = track.RunTimeTicks.HasValue ? (int)(track.RunTimeTicks.Value / 10000000) : 0, // Convert ticks to seconds
+            CanPlay = true,
+            CanStream = true
         }).ToList();
         
         _logger.LogInformation("Returning {MediaMetadataCount} track metadata", mediaMetadata.Count);
@@ -573,13 +557,10 @@ public class SonosService : ISonosService
             ".m4a" => "audio/mp4",
             ".mp4" => "audio/mp4",
             ".aac" => "audio/aac",
-            ".ogg" => "audio/ogg",
-            ".oga" => "audio/ogg",
+            ".ogg" => "application/ogg",
             ".wav" => "audio/wav",
             ".wma" => "audio/x-ms-wma",
             ".asf" => "audio/x-ms-wma",
-            ".aiff" => "audio/aiff",
-            ".aif" => "audio/aiff",
             _ => "audio/mpeg" // Default to MP3 for unknown formats
         };
     }
@@ -635,17 +616,12 @@ public class SonosService : ISonosService
                     Title = track.Name,
                     ItemType = "track",
                     MimeType = GetMimeType(track.Path),
-                    TrackMetadata = new TrackMetadata
-                    {
-                        Artist = track.AlbumArtists?.FirstOrDefault(),
-                        Album = track.Album,
-                        Duration = track.RunTimeTicks.HasValue ? (int)(track.RunTimeTicks.Value / 10000000) : 0,
-                        AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
-                        TrackNumber = track.IndexNumber,
-                        CanPlay = true,
-                        CanSkip = true,
-                        CanAddToFavorites = true
-                    }
+                    TrackNumber = track.IndexNumber,
+                    Artist = track.AlbumArtists?.FirstOrDefault(),
+                    Album = track.Album,
+                    AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
+                    Duration = track.RunTimeTicks.HasValue ? (int)(track.RunTimeTicks.Value / 10000000) : 0, // Convert ticks to seconds
+                    CanPlay = true
                 }
             };
         }
@@ -694,36 +670,35 @@ public class SonosService : ISonosService
 
             _logger.LogInformation("Track found: {TrackName}, path={Path}", track.Name, track.Path);
             var config = _configProvider.GetConfiguration();
-            var baseUrl = config.ExternalUrl?.TrimEnd('/') ?? string.Empty;
+            var baseUrl = config.ExternalUrl;
 
-            // Build streaming URL using the plugin's /sonos/stream endpoint
-            // This properly validates our custom OAuth tokens
+            // Force MP3 transcoding for maximum Sonos compatibility
+            // MP3 is universally supported by all Sonos devices and avoids:
+            // - Hi-res format (FLAC) compatibility issues with some Sonos models
+            // - Format-specific client-side validation quirks
+            // - Ensures consistent streaming behavior across all Sonos clients
+            // Jellyfin's transcoder handles Content-Length correctly for MP3
             string BuildStreamUrl()
             {
-                var basePath = $"{baseUrl}/sonos/stream?trackId={trackId}";
+                // Use ?Container=mp3 to request MP3 transcoding
+                var basePath = $"{baseUrl}/Audio/{trackId}/stream?Container=mp3";
 
                 if (!string.IsNullOrWhiteSpace(authToken))
                 {
-                    // Pass token as sonos_token query param to avoid collision with Jellyfin's native access_token
-                    basePath += $"&sonos_token={Uri.EscapeDataString(authToken)}";
+                    // Sonos will treat the entire string as opaque; we only need a stable param name.
+                    basePath += $"&api_key={Uri.EscapeDataString(authToken)}";
                 }
 
                 return basePath;
             }
 
             var mediaUri = BuildStreamUrl();
+            var protocolInfo = "http-get:*:audio/mpeg:*";  // MP3 is always audio/mpeg
 
-            // Match protocolInfo scheme to the stream URL scheme so Sonos does not reject HTTPS streams.
-            var scheme = Uri.TryCreate(baseUrl, UriKind.Absolute, out var parsedBase)
-                ? parsedBase.Scheme
-                : "http";
-            var protocolScheme = scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ? "https-get" : "http-get";
-            var protocolInfo = $"{protocolScheme}:*:audio/*:*";  // Accept any audio format
-
-            _logger.LogInformation("Returning mediaUri={MediaUri}, original format={Format}", 
+            _logger.LogInformation("Returning mediaUri={MediaUri} for MP3 transcoding, original format={Format}", 
                 mediaUri, System.IO.Path.GetExtension(track.Path));
             
-            // Build response with streaming URL and proper headers
+            // Always pass auth token to Sonos - it will include it in requests
             var response = new GetMediaURIResponse
             {
                 MediaUri = mediaUri,
@@ -745,12 +720,12 @@ public class SonosService : ISonosService
                 Value = "no-transform"
             });
 
-            // Pass auth token as custom header to avoid collision with Jellyfin's native Authorization header
+            // Always pass auth token (if provided) so Sonos includes it in GET/HEAD requests
             if (!string.IsNullOrWhiteSpace(authToken))
             {
                 response.HttpHeaders.Add(new HttpHeader
                 {
-                    Header = "X-Sonos-Auth",
+                    Header = "Authorization",
                     Value = $"Bearer {authToken}"
                 });
             }
@@ -815,8 +790,7 @@ public class SonosService : ISonosService
                             ItemType = "album",
                             Artist = album.AlbumArtist,
                             AlbumArtURI = GetImageUrl(baseUrl, album.Id),
-                            CanPlay = true,
-                            CanPlayContainer = true
+                            CanPlay = true
                         };
                     }
                     break;
@@ -829,8 +803,7 @@ public class SonosService : ISonosService
                             Title = artist.Name,
                             ItemType = "artist",
                             AlbumArtURI = GetImageUrl(baseUrl, artist.Id),
-                            CanPlay = false,  // Artists are containers, NOT directly playable
-                            CanPlayContainer = true  // But they ARE browsable containers
+                            CanPlay = false
                         };
                     }
                     break;
@@ -843,8 +816,7 @@ public class SonosService : ISonosService
                             Title = item.Name,
                             ItemType = "playlist",
                             AlbumArtURI = GetImageUrl(baseUrl, item.Id),
-                            CanPlay = true,
-                            CanPlayContainer = true
+                            CanPlay = true
                         };
                     }
                     break;
@@ -915,8 +887,7 @@ public class SonosService : ISonosService
                             Title = artist.Name,
                             ItemType = "artist",
                             AlbumArtURI = GetImageUrl(baseUrl, artist.Id),
-                            CanPlay = false,
-                            CanPlayContainer = true
+                            CanPlay = false
                         }).ToList()
                     };
 
@@ -944,8 +915,7 @@ public class SonosService : ISonosService
                             ItemType = "album",
                             Artist = album.AlbumArtist,
                             AlbumArtURI = GetImageUrl(baseUrl, album.Id),
-                            CanPlay = true,
-                            CanPlayContainer = true
+                            CanPlay = true
                         }).ToList()
                     };
 
@@ -970,15 +940,10 @@ public class SonosService : ISonosService
                             Title = track.Name,
                             ItemType = "track",
                             MimeType = GetMimeType(track.Path),
-                            TrackMetadata = new TrackMetadata
-                            {
-                                Artist = track.AlbumArtists?.FirstOrDefault(),
-                                Album = track.Album,
-                                AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
-                                CanPlay = true,
-                                CanSkip = true,
-                                CanAddToFavorites = true
-                            }
+                            Artist = track.AlbumArtists?.FirstOrDefault(),
+                            Album = track.Album,
+                            AlbumArtURI = track.ParentId != Guid.Empty ? GetImageUrl(baseUrl, track.ParentId) : null,
+                            CanPlay = true
                         }).ToList()
                     };
 

@@ -521,13 +521,18 @@ public class SonosController : ControllerBase
     /// </summary>
     /// <param name="trackId">Track ID (GUID).</param>
     /// <returns>Audio stream.</returns>
-    [HttpGet("stream/{trackId}")]
+    [HttpGet("stream")]
     [AllowAnonymous]
-    public async Task<IActionResult> Stream(string trackId)
+    public async Task<IActionResult> Stream([FromQuery] string trackId)
     {
         try
         {
             _logger.LogInformation("Stream request for track: {TrackId}", trackId);
+
+            if (string.IsNullOrWhiteSpace(trackId))
+            {
+                return BadRequest("Track ID is required");
+            }
 
             if (!TryValidateAccessToken(out var principal))
             {
@@ -565,11 +570,17 @@ public class SonosController : ControllerBase
             // Determine MIME type
             var mimeType = GetMimeType(audioItem.Path);
 
+            // Disable response compression to avoid Content-Length mismatches
+            // and ensure Sonos can seek properly
+            Response.Headers["Content-Encoding"] = "identity";
+            Response.Headers["Accept-Ranges"] = "bytes";
+
             // Open file stream
             var stream = new FileStream(audioItem.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
 
             // Return file stream
-            _logger.LogInformation("Streaming track: {TrackName} ({Path}) for user {User}", audioItem.Name, audioItem.Path, principal.Username);
+            _logger.LogInformation("Streaming track: {TrackName} ({Path}) for user {User} [Mime: {MimeType}]", 
+                audioItem.Name, audioItem.Path, principal.Username, mimeType);
             return File(stream, mimeType, enableRangeProcessing: true);
         }
         catch (Exception ex)
@@ -630,10 +641,15 @@ public class SonosController : ControllerBase
             ".mp3" => "audio/mpeg",
             ".flac" => "audio/flac",
             ".m4a" => "audio/mp4",
+            ".mp4" => "audio/mp4",
             ".aac" => "audio/aac",
             ".ogg" => "audio/ogg",
+            ".oga" => "audio/ogg",
             ".wav" => "audio/wav",
             ".wma" => "audio/x-ms-wma",
+            ".asf" => "audio/x-ms-wma",
+            ".aiff" => "audio/aiff",
+            ".aif" => "audio/aiff",
             _ => "audio/mpeg"
         };
     }
@@ -661,7 +677,18 @@ public class SonosController : ControllerBase
 
     private string? ExtractAccessToken()
     {
-        // 1) Authorization header
+        // 1) Custom X-Sonos-Auth header (preferred to avoid Jellyfin collision)
+        if (Request.Headers.TryGetValue("X-Sonos-Auth", out var customValues))
+        {
+            var header = customValues.ToString();
+            const string bearer = "Bearer ";
+            if (header.StartsWith(bearer, StringComparison.OrdinalIgnoreCase))
+            {
+                return header.Substring(bearer.Length).Trim();
+            }
+        }
+
+        // 2) Authorization header (fallback)
         if (Request.Headers.TryGetValue("Authorization", out var values))
         {
             var header = values.ToString();
@@ -672,7 +699,13 @@ public class SonosController : ControllerBase
             }
         }
 
-        // 2) access_token query string (used by Sonos when invoking mediaUri)
+        // 3) sonos_token query string (preferred)
+        if (Request.Query.TryGetValue("sonos_token", out var sonosTokenValues))
+        {
+            return sonosTokenValues.ToString();
+        }
+
+        // 4) access_token query string (legacy/fallback)
         if (Request.Query.TryGetValue("access_token", out var tokenValues))
         {
             return tokenValues.ToString();

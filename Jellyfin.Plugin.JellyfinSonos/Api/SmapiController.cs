@@ -60,14 +60,25 @@ public class SmapiController : ControllerBase
             nsmgr.AddNamespace("ns", "http://www.sonos.com/Services/1.1");
 
             // Prefer HTTP Authorization bearer over SOAP headers for OAuth flows
-            var authToken = ExtractBearerToken() ?? ExtractAuthToken(doc, nsmgr);
+            var bearerToken = ExtractBearerToken();
+            var xmlToken = ExtractAuthToken(doc);
+            var authToken = bearerToken ?? xmlToken;
+
+            if (bearerToken != null)
+            {
+                _logger.LogDebug("Auth token found via HTTP Bearer header (length: {Length})", bearerToken.Length);
+            }
+            else if (xmlToken != null)
+            {
+                _logger.LogDebug("Auth token found via SOAP Header XML (length: {Length})", xmlToken.Length);
+            }
+
             if (string.IsNullOrWhiteSpace(authToken))
             {
                 _logger.LogDebug("No auth token found in request");
             }
             else
             {
-                _logger.LogDebug("Auth token found (length: {Length})", authToken.Length);
                 // Log decoded payload (no signature) to confirm userId/exp
                 var payload = DecodeTokenPayload(authToken);
                 if (!string.IsNullOrEmpty(payload))
@@ -138,8 +149,19 @@ public class SmapiController : ControllerBase
                     break;
 
                 case "getExtendedMetadata":
-                    // Minimal empty response to satisfy Sonos calls; extend as needed
-                    response = BuildSoapResponse("getExtendedMetadataResponse", "<ns:getExtendedMetadataResult></ns:getExtendedMetadataResult>");
+                    var extId = GetElementValue(doc, "id", nsmgr);
+                    // Tracks: reuse GetMediaMetadata for Info View
+                    if (!string.IsNullOrEmpty(extId) && extId.StartsWith("track:"))
+                    {
+                        var extTrackMeta = _sonosService.GetMediaMetadata(extId, authToken);
+                        response = BuildSoapResponse("getExtendedMetadataResponse", SerializeExtendedMetadata(mediaMetadata: extTrackMeta.MediaMetadata, mediaCollection: null));
+                    }
+                    else
+                    {
+                        // Albums, artists, playlists: return a single mediaCollection describing the item
+                        var extCollection = _sonosService.GetCollectionMetadata(extId, authToken);
+                        response = BuildSoapResponse("getExtendedMetadataResponse", SerializeExtendedMetadata(mediaMetadata: null, mediaCollection: extCollection));
+                    }
                     break;
 
                 case "getMediaMetadata":
@@ -175,7 +197,11 @@ public class SmapiController : ControllerBase
             }
 
             _logger.LogDebug("SMAPI SOAP Response: {Response}", response);
-            return Content(response, "text/xml");
+            
+            // Return XML with explicit UTF-8 encoding to prevent Content-Length mismatch
+            // Use charset=utf-8 to match the actual encoding of the response
+            var bytes = Encoding.UTF8.GetBytes(response);
+            return new Microsoft.AspNetCore.Mvc.FileContentResult(bytes, "application/xml; charset=utf-8");
         }
         catch (Exception ex)
         {
@@ -190,26 +216,20 @@ public class SmapiController : ControllerBase
         return node?.InnerText ?? string.Empty;
     }
 
-    private static string? ExtractAuthToken(XmlDocument doc, XmlNamespaceManager nsmgr)
+    private static string? ExtractAuthToken(XmlDocument doc)
     {
-        // Try to extract credentials from SOAP header
-        var headerNode = doc.SelectSingleNode("//soap:Header", nsmgr);
-        if (headerNode == null)
-        {
-            return null;
-        }
-
-        nsmgr.AddNamespace("cred", "http://www.sonos.com/Services/1.1");
+        // Try to extract credentials from SOAP header using namespace-agnostic XPath
+        // This handles cases where prefixes differ (e.g. soap vs s) or default namespaces are used
         
         // Look for credentials/loginToken/token
-        var tokenNode = headerNode.SelectSingleNode("//cred:credentials/cred:loginToken/cred:token", nsmgr);
+        var tokenNode = doc.SelectSingleNode("//*[local-name()='Envelope']/*[local-name()='Header']/*[local-name()='credentials']/*[local-name()='loginToken']/*[local-name()='token']");
         if (tokenNode != null)
         {
             return tokenNode.InnerText;
         }
 
         // Alternative: look for authToken directly
-        tokenNode = headerNode.SelectSingleNode("//cred:authToken", nsmgr);
+        tokenNode = doc.SelectSingleNode("//*[local-name()='Envelope']/*[local-name()='Header']/*[local-name()='credentials']/*[local-name()='authToken']");
         return tokenNode?.InnerText;
     }
 
@@ -277,6 +297,80 @@ public class SmapiController : ControllerBase
         </ns:{methodName}>
     </soap:Body>
 </soap:Envelope>";
+    }
+
+    private static string SerializeExtendedMetadata(MediaMetadata? mediaMetadata, MediaCollection? mediaCollection)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("<ns:getExtendedMetadataResult>");
+        if (mediaMetadata != null)
+        {
+            sb.AppendLine("    <ns:mediaMetadata>");
+            sb.AppendLine($"        <ns:id>{System.Security.SecurityElement.Escape(mediaMetadata.Id)}</ns:id>");
+            sb.AppendLine($"        <ns:title>{System.Security.SecurityElement.Escape(mediaMetadata.Title)}</ns:title>");
+            sb.AppendLine($"        <ns:mimeType>{mediaMetadata.MimeType}</ns:mimeType>");
+            sb.AppendLine($"        <ns:itemType>{mediaMetadata.ItemType}</ns:itemType>");
+            
+            if (mediaMetadata.TrackMetadata != null)
+            {
+                sb.AppendLine("        <ns:trackMetadata>");
+                if (!string.IsNullOrEmpty(mediaMetadata.TrackMetadata.ArtistId))
+                {
+                    sb.AppendLine($"            <ns:artistId>{System.Security.SecurityElement.Escape(mediaMetadata.TrackMetadata.ArtistId)}</ns:artistId>");
+                }
+                if (!string.IsNullOrEmpty(mediaMetadata.TrackMetadata.Artist))
+                {
+                    sb.AppendLine($"            <ns:artist>{System.Security.SecurityElement.Escape(mediaMetadata.TrackMetadata.Artist)}</ns:artist>");
+                }
+                if (!string.IsNullOrEmpty(mediaMetadata.TrackMetadata.AlbumId))
+                {
+                    sb.AppendLine($"            <ns:albumId>{System.Security.SecurityElement.Escape(mediaMetadata.TrackMetadata.AlbumId)}</ns:albumId>");
+                }
+                if (!string.IsNullOrEmpty(mediaMetadata.TrackMetadata.Album))
+                {
+                    sb.AppendLine($"            <ns:album>{System.Security.SecurityElement.Escape(mediaMetadata.TrackMetadata.Album)}</ns:album>");
+                }
+                if (mediaMetadata.TrackMetadata.Duration.HasValue)
+                {
+                    sb.AppendLine($"            <ns:duration>{mediaMetadata.TrackMetadata.Duration.Value}</ns:duration>");
+                }
+                if (!string.IsNullOrEmpty(mediaMetadata.TrackMetadata.AlbumArtURI))
+                {
+                    sb.AppendLine($"            <ns:albumArtURI>{System.Security.SecurityElement.Escape(mediaMetadata.TrackMetadata.AlbumArtURI)}</ns:albumArtURI>");
+                }
+                if (mediaMetadata.TrackMetadata.TrackNumber.HasValue)
+                {
+                    sb.AppendLine($"            <ns:trackNumber>{mediaMetadata.TrackMetadata.TrackNumber.Value}</ns:trackNumber>");
+                }
+                sb.AppendLine($"            <ns:canPlay>{mediaMetadata.TrackMetadata.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                sb.AppendLine($"            <ns:canSkip>{mediaMetadata.TrackMetadata.CanSkip.ToString().ToLower()}</ns:canSkip>");
+                sb.AppendLine($"            <ns:canAddToFavorites>{mediaMetadata.TrackMetadata.CanAddToFavorites.ToString().ToLower()}</ns:canAddToFavorites>");
+                sb.AppendLine("        </ns:trackMetadata>");
+            }
+            
+            sb.AppendLine("    </ns:mediaMetadata>");
+        }
+        else if (mediaCollection != null)
+        {
+            sb.AppendLine("    <ns:mediaCollection>");
+            sb.AppendLine($"        <ns:id>{System.Security.SecurityElement.Escape(mediaCollection.Id)}</ns:id>");
+            sb.AppendLine($"        <ns:title>{System.Security.SecurityElement.Escape(mediaCollection.Title)}</ns:title>");
+            sb.AppendLine($"        <ns:itemType>{mediaCollection.ItemType}</ns:itemType>");
+            if (!string.IsNullOrEmpty(mediaCollection.Artist))
+            {
+                sb.AppendLine($"        <ns:artist>{System.Security.SecurityElement.Escape(mediaCollection.Artist)}</ns:artist>");
+            }
+            if (!string.IsNullOrEmpty(mediaCollection.AlbumArtURI))
+            {
+                sb.AppendLine($"        <ns:albumArtURI>{System.Security.SecurityElement.Escape(mediaCollection.AlbumArtURI)}</ns:albumArtURI>");
+            }
+            sb.AppendLine($"        <ns:canPlay>{mediaCollection.CanPlay.ToString().ToLower()}</ns:canPlay>");
+            // canPlayContainer: whether the container itself is playable/browsable (for albums, playlists, etc)
+            sb.AppendLine($"        <ns:canPlayContainer>{mediaCollection.CanPlayContainer.ToString().ToLower()}</ns:canPlayContainer>");
+            sb.AppendLine("    </ns:mediaCollection>");
+        }
+        sb.AppendLine("</ns:getExtendedMetadataResult>");
+        return sb.ToString();
     }
 
     private static string BuildSoapFault(string faultCode, string faultString)
@@ -350,6 +444,8 @@ public class SmapiController : ControllerBase
                     sb.AppendLine($"        <ns:albumArtURI>{System.Security.SecurityElement.Escape(collection.AlbumArtURI)}</ns:albumArtURI>");
                 }
                 sb.AppendLine($"        <ns:canPlay>{collection.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                // canPlayContainer: whether the container itself is playable/browsable (for albums, playlists, etc)
+                sb.AppendLine($"        <ns:canPlayContainer>{collection.CanPlayContainer.ToString().ToLower()}</ns:canPlayContainer>");
                 sb.AppendLine($"    </ns:mediaCollection>");
             }
         }
@@ -363,27 +459,44 @@ public class SmapiController : ControllerBase
                 sb.AppendLine($"        <ns:title>{System.Security.SecurityElement.Escape(meta.Title)}</ns:title>");
                 sb.AppendLine($"        <ns:mimeType>{meta.MimeType}</ns:mimeType>");
                 sb.AppendLine($"        <ns:itemType>{meta.ItemType}</ns:itemType>");
-                if (meta.TrackNumber.HasValue)
+                
+                if (meta.TrackMetadata != null)
                 {
-                    sb.AppendLine($"        <ns:trackNumber>{meta.TrackNumber.Value}</ns:trackNumber>");
+                    sb.AppendLine("        <ns:trackMetadata>");
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.ArtistId))
+                    {
+                        sb.AppendLine($"            <ns:artistId>{System.Security.SecurityElement.Escape(meta.TrackMetadata.ArtistId)}</ns:artistId>");
+                    }
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.Artist))
+                    {
+                        sb.AppendLine($"            <ns:artist>{System.Security.SecurityElement.Escape(meta.TrackMetadata.Artist)}</ns:artist>");
+                    }
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.AlbumId))
+                    {
+                        sb.AppendLine($"            <ns:albumId>{System.Security.SecurityElement.Escape(meta.TrackMetadata.AlbumId)}</ns:albumId>");
+                    }
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.Album))
+                    {
+                        sb.AppendLine($"            <ns:album>{System.Security.SecurityElement.Escape(meta.TrackMetadata.Album)}</ns:album>");
+                    }
+                    if (meta.TrackMetadata.Duration.HasValue)
+                    {
+                        sb.AppendLine($"            <ns:duration>{meta.TrackMetadata.Duration.Value}</ns:duration>");
+                    }
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.AlbumArtURI))
+                    {
+                        sb.AppendLine($"            <ns:albumArtURI>{System.Security.SecurityElement.Escape(meta.TrackMetadata.AlbumArtURI)}</ns:albumArtURI>");
+                    }
+                    if (meta.TrackMetadata.TrackNumber.HasValue)
+                    {
+                        sb.AppendLine($"            <ns:trackNumber>{meta.TrackMetadata.TrackNumber.Value}</ns:trackNumber>");
+                    }
+                    sb.AppendLine($"            <ns:canPlay>{meta.TrackMetadata.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                    sb.AppendLine($"            <ns:canSkip>{meta.TrackMetadata.CanSkip.ToString().ToLower()}</ns:canSkip>");
+                    sb.AppendLine($"            <ns:canAddToFavorites>{meta.TrackMetadata.CanAddToFavorites.ToString().ToLower()}</ns:canAddToFavorites>");
+                    sb.AppendLine("        </ns:trackMetadata>");
                 }
-                if (!string.IsNullOrEmpty(meta.Artist))
-                {
-                    sb.AppendLine($"        <ns:artist>{System.Security.SecurityElement.Escape(meta.Artist)}</ns:artist>");
-                }
-                if (!string.IsNullOrEmpty(meta.Album))
-                {
-                    sb.AppendLine($"        <ns:album>{System.Security.SecurityElement.Escape(meta.Album)}</ns:album>");
-                }
-                if (!string.IsNullOrEmpty(meta.AlbumArtURI))
-                {
-                    sb.AppendLine($"        <ns:albumArtURI>{System.Security.SecurityElement.Escape(meta.AlbumArtURI)}</ns:albumArtURI>");
-                }
-                if (meta.Duration.HasValue)
-                {
-                    sb.AppendLine($"        <ns:duration>{meta.Duration.Value}</ns:duration>");
-                }
-                sb.AppendLine($"        <ns:canPlay>{meta.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                
                 sb.AppendLine($"    </ns:mediaMetadata>");
             }
         }
@@ -394,20 +507,60 @@ public class SmapiController : ControllerBase
 
     private static string SerializeMediaMetadata(GetMediaMetadataResponse response)
     {
-        var metadata = response.MediaMetadata;
-        if (metadata == null)
+        var meta = response.MediaMetadata;
+        if (meta == null)
         {
             return "<ns:getMediaMetadataResult />";
         }
 
-        return $@"<ns:getMediaMetadataResult>
-            <ns:mediaMetadata>
-                <ns:id>{System.Security.SecurityElement.Escape(metadata.Id)}</ns:id>
-                <ns:title>{System.Security.SecurityElement.Escape(metadata.Title)}</ns:title>
-                <ns:mimeType>{metadata.MimeType}</ns:mimeType>
-                <ns:itemType>{metadata.ItemType}</ns:itemType>
-            </ns:mediaMetadata>
-        </ns:getMediaMetadataResult>";
+        var sb = new StringBuilder();
+        sb.AppendLine("<ns:getMediaMetadataResult>");
+        sb.AppendLine("    <ns:mediaMetadata>");
+        sb.AppendLine($"        <ns:id>{System.Security.SecurityElement.Escape(meta.Id)}</ns:id>");
+        sb.AppendLine($"        <ns:title>{System.Security.SecurityElement.Escape(meta.Title)}</ns:title>");
+        sb.AppendLine($"        <ns:mimeType>{System.Security.SecurityElement.Escape(meta.MimeType ?? "")}</ns:mimeType>");
+        sb.AppendLine($"        <ns:itemType>{System.Security.SecurityElement.Escape(meta.ItemType ?? "track")}</ns:itemType>");
+        
+        if (meta.TrackMetadata != null)
+        {
+            sb.AppendLine("        <ns:trackMetadata>");
+            if (!string.IsNullOrEmpty(meta.TrackMetadata.ArtistId))
+            {
+                sb.AppendLine($"            <ns:artistId>{System.Security.SecurityElement.Escape(meta.TrackMetadata.ArtistId)}</ns:artistId>");
+            }
+            if (!string.IsNullOrEmpty(meta.TrackMetadata.Artist))
+            {
+                sb.AppendLine($"            <ns:artist>{System.Security.SecurityElement.Escape(meta.TrackMetadata.Artist)}</ns:artist>");
+            }
+            if (!string.IsNullOrEmpty(meta.TrackMetadata.AlbumId))
+            {
+                sb.AppendLine($"            <ns:albumId>{System.Security.SecurityElement.Escape(meta.TrackMetadata.AlbumId)}</ns:albumId>");
+            }
+            if (!string.IsNullOrEmpty(meta.TrackMetadata.Album))
+            {
+                sb.AppendLine($"            <ns:album>{System.Security.SecurityElement.Escape(meta.TrackMetadata.Album)}</ns:album>");
+            }
+            if (meta.TrackMetadata.Duration.HasValue)
+            {
+                sb.AppendLine($"            <ns:duration>{meta.TrackMetadata.Duration.Value}</ns:duration>");
+            }
+            if (!string.IsNullOrEmpty(meta.TrackMetadata.AlbumArtURI))
+            {
+                sb.AppendLine($"            <ns:albumArtURI>{System.Security.SecurityElement.Escape(meta.TrackMetadata.AlbumArtURI)}</ns:albumArtURI>");
+            }
+            if (meta.TrackMetadata.TrackNumber.HasValue)
+            {
+                sb.AppendLine($"            <ns:trackNumber>{meta.TrackMetadata.TrackNumber.Value}</ns:trackNumber>");
+            }
+            sb.AppendLine($"            <ns:canPlay>{meta.TrackMetadata.CanPlay.ToString().ToLower()}</ns:canPlay>");
+            sb.AppendLine($"            <ns:canSkip>{meta.TrackMetadata.CanSkip.ToString().ToLower()}</ns:canSkip>");
+            sb.AppendLine($"            <ns:canAddToFavorites>{meta.TrackMetadata.CanAddToFavorites.ToString().ToLower()}</ns:canAddToFavorites>");
+            sb.AppendLine("        </ns:trackMetadata>");
+        }
+        
+        sb.AppendLine("    </ns:mediaMetadata>");
+        sb.AppendLine("</ns:getMediaMetadataResult>");
+        return sb.ToString();
     }
 
     private static string SerializeMediaURI(GetMediaURIResponse response)
@@ -415,6 +568,11 @@ public class SmapiController : ControllerBase
         var sb = new StringBuilder();
         sb.AppendLine("<ns:getMediaURIResult>");
         sb.AppendLine($"    <ns:mediaUri>{System.Security.SecurityElement.Escape(response.MediaUri ?? string.Empty)}</ns:mediaUri>");
+
+        if (!string.IsNullOrWhiteSpace(response.ProtocolInfo))
+        {
+            sb.AppendLine($"    <ns:protocolInfo>{System.Security.SecurityElement.Escape(response.ProtocolInfo)}</ns:protocolInfo>");
+        }
 
         if (response.HttpHeaders != null && response.HttpHeaders.Any())
         {
@@ -501,27 +659,44 @@ public class SmapiController : ControllerBase
                 sb.AppendLine($"        <ns:title>{System.Security.SecurityElement.Escape(meta.Title)}</ns:title>");
                 sb.AppendLine($"        <ns:mimeType>{meta.MimeType}</ns:mimeType>");
                 sb.AppendLine($"        <ns:itemType>{meta.ItemType}</ns:itemType>");
-                if (meta.TrackNumber.HasValue)
+                
+                if (meta.TrackMetadata != null)
                 {
-                    sb.AppendLine($"        <ns:trackNumber>{meta.TrackNumber.Value}</ns:trackNumber>");
+                    sb.AppendLine("        <ns:trackMetadata>");
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.ArtistId))
+                    {
+                        sb.AppendLine($"            <ns:artistId>{System.Security.SecurityElement.Escape(meta.TrackMetadata.ArtistId)}</ns:artistId>");
+                    }
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.Artist))
+                    {
+                        sb.AppendLine($"            <ns:artist>{System.Security.SecurityElement.Escape(meta.TrackMetadata.Artist)}</ns:artist>");
+                    }
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.AlbumId))
+                    {
+                        sb.AppendLine($"            <ns:albumId>{System.Security.SecurityElement.Escape(meta.TrackMetadata.AlbumId)}</ns:albumId>");
+                    }
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.Album))
+                    {
+                        sb.AppendLine($"            <ns:album>{System.Security.SecurityElement.Escape(meta.TrackMetadata.Album)}</ns:album>");
+                    }
+                    if (meta.TrackMetadata.Duration.HasValue)
+                    {
+                        sb.AppendLine($"            <ns:duration>{meta.TrackMetadata.Duration.Value}</ns:duration>");
+                    }
+                    if (!string.IsNullOrEmpty(meta.TrackMetadata.AlbumArtURI))
+                    {
+                        sb.AppendLine($"            <ns:albumArtURI>{System.Security.SecurityElement.Escape(meta.TrackMetadata.AlbumArtURI)}</ns:albumArtURI>");
+                    }
+                    if (meta.TrackMetadata.TrackNumber.HasValue)
+                    {
+                        sb.AppendLine($"            <ns:trackNumber>{meta.TrackMetadata.TrackNumber.Value}</ns:trackNumber>");
+                    }
+                    sb.AppendLine($"            <ns:canPlay>{meta.TrackMetadata.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                    sb.AppendLine($"            <ns:canSkip>{meta.TrackMetadata.CanSkip.ToString().ToLower()}</ns:canSkip>");
+                    sb.AppendLine($"            <ns:canAddToFavorites>{meta.TrackMetadata.CanAddToFavorites.ToString().ToLower()}</ns:canAddToFavorites>");
+                    sb.AppendLine("        </ns:trackMetadata>");
                 }
-                if (!string.IsNullOrEmpty(meta.Artist))
-                {
-                    sb.AppendLine($"        <ns:artist>{System.Security.SecurityElement.Escape(meta.Artist)}</ns:artist>");
-                }
-                if (!string.IsNullOrEmpty(meta.Album))
-                {
-                    sb.AppendLine($"        <ns:album>{System.Security.SecurityElement.Escape(meta.Album)}</ns:album>");
-                }
-                if (!string.IsNullOrEmpty(meta.AlbumArtURI))
-                {
-                    sb.AppendLine($"        <ns:albumArtURI>{System.Security.SecurityElement.Escape(meta.AlbumArtURI)}</ns:albumArtURI>");
-                }
-                if (meta.Duration.HasValue)
-                {
-                    sb.AppendLine($"        <ns:duration>{meta.Duration.Value}</ns:duration>");
-                }
-                sb.AppendLine($"        <ns:canPlay>{meta.CanPlay.ToString().ToLower()}</ns:canPlay>");
+                
                 sb.AppendLine($"    </ns:mediaMetadata>");
             }
         }

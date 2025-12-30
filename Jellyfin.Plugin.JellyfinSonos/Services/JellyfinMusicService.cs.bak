@@ -226,71 +226,21 @@ public class JellyfinMusicService
     {
         try
         {
-            const int MaxPageSize = 100;
-            limit = Math.Min(limit, MaxPageSize);
-            _logger.LogDebug("GetArtists: startIndex={StartIndex}, limit={Limit} (capped to {MaxPageSize})", startIndex, limit, MaxPageSize);
-
-            // Load all artists to deduplicate by name (case-insensitive)
+            // Get all artists first (will filter to those with albums in Jellyfin)
             var query = new InternalItemsQuery
             {
                 Recursive = true,
-                StartIndex = 0,
-                Limit = 5000  // Load all to deduplicate
+                StartIndex = startIndex,
+                Limit = limit
             };
             TrySetIncludeItemTypes(query, "MusicArtist");
 
             var result = _libraryManager.GetItemsResult(query);
+            var artists = result.Items.OfType<MusicArtist>().ToList();
             
-            // Deduplicate by normalized name. Pick the "best" candidate using cheap metadata so we avoid
-            // per-artist album counting (which caused timeouts). Preference order:
-            // 1) Higher ProductionYear (when available)
-            // 2) Newer DateCreated
-            // 3) First seen
-            var seen = new Dictionary<string, MusicArtist>(StringComparer.OrdinalIgnoreCase);
-            var uniqueArtists = new List<MusicArtist>();
-
-            foreach (var item in result.Items.OfType<MusicArtist>())
-            {
-                // Normalize artist name: lowercase, remove special chars/spaces, keep only alphanumeric
-                string normalizedName = NormalizeArtistName(item.Name);
-                
-                if (!seen.TryGetValue(normalizedName, out var existing))
-                {
-                    seen.Add(normalizedName, item);
-                    uniqueArtists.Add(item);
-                    _logger.LogDebug("Added artist: {Name} (normalized: {Normalized}, {Id})",
-                        item.Name, normalizedName, item.Id);
-                }
-                else
-                {
-                    int existingYear = existing.ProductionYear ?? 0;
-                    int newYear = item.ProductionYear ?? 0;
-                    var existingCreated = existing.DateCreated != default ? existing.DateCreated : DateTime.MinValue;
-                    var newCreated = item.DateCreated != default ? item.DateCreated : DateTime.MinValue;
-
-                    bool preferNew = newYear > existingYear || (newYear == existingYear && newCreated > existingCreated);
-
-                    if (preferNew)
-                    {
-                        seen[normalizedName] = item;
-                        uniqueArtists.Remove(existing);
-                        uniqueArtists.Add(item);
-                        _logger.LogDebug("Replaced duplicate: {Old} (year={OldYear}, created={OldCreated}) with {New} (year={NewYear}, created={NewCreated})",
-                            existing.Name, existingYear, existingCreated, item.Name, newYear, newCreated);
-                    }
-                    else
-                    {
-                        _logger.LogDebug("Skipped duplicate artist: {Name} (normalized: {Normalized}, {Id})",
-                            item.Name, normalizedName, item.Id);
-                    }
-                }
-            }
-
-            // Apply pagination after deduplication
-            var paginatedArtists = uniqueArtists.Skip(startIndex).Take(limit).ToList();
-            
-            _logger.LogDebug("GetArtists returning {Count} artists (unique from {Total})", paginatedArtists.Count, uniqueArtists.Count);
-            return (paginatedArtists, uniqueArtists.Count);
+            // Only return artists that have albums (Jellyfin will filter these out internally if configured)
+            // For now, return all artists that Jellyfin returned
+            return (artists, result.TotalRecordCount);
         }
         catch (Exception ex)
         {
@@ -347,36 +297,14 @@ public class JellyfinMusicService
             {
                 Recursive = true,
                 StartIndex = 0,
-                Limit = Math.Max(limit * 5, 2000)  // Load more to deduplicate
+                Limit = Math.Max(limit * 5, 500)
             };
             TrySetIncludeItemTypes(query, "MusicAlbum");
 
             var result = _libraryManager.GetItemsResult(query);
-            
-            // Deduplicate albums by normalized name and artist to avoid duplicates
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var uniqueAlbums = new List<MusicAlbum>();
-
-            foreach (var album in result.Items.OfType<MusicAlbum>())
-            {
-                // Create a normalized key combining album name and primary artist
-                string artistName = album.AlbumArtist ?? string.Empty;
-                string normalizedKey = $"{NormalizeArtistName(album.Name)}|{NormalizeArtistName(artistName)}";
-                
-                if (!seen.Contains(normalizedKey))
-                {
-                    seen.Add(normalizedKey);
-                    uniqueAlbums.Add(album);
-                    _logger.LogTrace("Added album: {Name} by {Artist} ({Id})", album.Name, artistName, album.Id);
-                }
-                else
-                {
-                    _logger.LogDebug("Skipped duplicate album: {Name} by {Artist} ({Id})", album.Name, artistName, album.Id);
-                }
-            }
-
-            var paginatedAlbums = uniqueAlbums.Skip(startIndex).Take(limit).ToList();
-            return (paginatedAlbums, uniqueAlbums.Count);
+            var albums = result.Items.OfType<MusicAlbum>().Skip(startIndex).Take(limit).ToList();
+            var totalAlbums = result.Items.OfType<MusicAlbum>().Count();
+            return (albums, totalAlbums);
         }
         catch (Exception ex)
         {
@@ -645,24 +573,4 @@ public class JellyfinMusicService
             _logger.LogDebug(ex, "Failed to set playlist scope on InternalItemsQuery");
         }
     }
-
-    /// <summary>
-    /// Normalizes artist names for deduplication by removing special characters and normalizing case.
-    /// This helps merge artists like "AC/DC", "AC+DC", "AC DC" into one canonical name.
-    /// </summary>
-    /// <param name="name">Artist name to normalize.</param>
-    /// <returns>Normalized name (lowercase, alphanumeric only).</returns>
-    private string NormalizeArtistName(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return string.Empty;
-        }
-
-        // Convert to lowercase and remove all non-alphanumeric characters except spaces
-        // Then collapse multiple spaces and remove all spaces
-        var normalized = System.Text.RegularExpressions.Regex.Replace(name.ToLowerInvariant(), @"[^a-z0-9]+", string.Empty);
-        return normalized;
-    }
 }
-

@@ -251,6 +251,12 @@ public class MediaCollection
     /// </summary>
     [DataMember]
     public bool CanPlay { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether this container can be played/browsed.
+    /// </summary>
+    [DataMember]
+    public bool CanPlayContainer { get; set; } = true;
 }
 
 /// <summary>
@@ -272,22 +278,35 @@ public class MediaMetadata
     public string Title { get; set; } = string.Empty;
 
     /// <summary>
-    /// Gets or sets the mime type.
-    /// </summary>
-    [DataMember]
-    public string MimeType { get; set; } = "audio/mp3";
-
-    /// <summary>
     /// Gets or sets the item type.
     /// </summary>
     [DataMember]
     public string ItemType { get; set; } = "track";
 
     /// <summary>
-    /// Gets or sets the track number.
+    /// Gets or sets the mime type.
     /// </summary>
     [DataMember]
-    public int? TrackNumber { get; set; }
+    public string MimeType { get; set; } = "audio/mpeg";
+
+    /// <summary>
+    /// Gets or sets the track metadata.
+    /// </summary>
+    [DataMember]
+    public TrackMetadata? TrackMetadata { get; set; }
+}
+
+/// <summary>
+/// Track metadata.
+/// </summary>
+[DataContract]
+public class TrackMetadata
+{
+    /// <summary>
+    /// Gets or sets the artist ID.
+    /// </summary>
+    [DataMember]
+    public string? ArtistId { get; set; }
 
     /// <summary>
     /// Gets or sets the artist.
@@ -296,16 +315,16 @@ public class MediaMetadata
     public string? Artist { get; set; }
 
     /// <summary>
+    /// Gets or sets the album ID.
+    /// </summary>
+    [DataMember]
+    public string? AlbumId { get; set; }
+
+    /// <summary>
     /// Gets or sets the album.
     /// </summary>
     [DataMember]
     public string? Album { get; set; }
-
-    /// <summary>
-    /// Gets or sets the album art URI.
-    /// </summary>
-    [DataMember]
-    public string? AlbumArtURI { get; set; }
 
     /// <summary>
     /// Gets or sets the duration in seconds.
@@ -314,10 +333,34 @@ public class MediaMetadata
     public int? Duration { get; set; }
 
     /// <summary>
+    /// Gets or sets the album art URI.
+    /// </summary>
+    [DataMember]
+    public string? AlbumArtURI { get; set; }
+
+    /// <summary>
+    /// Gets or sets the track number.
+    /// </summary>
+    [DataMember]
+    public int? TrackNumber { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether this can be played.
     /// </summary>
     [DataMember]
     public bool CanPlay { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether this can be skipped.
+    /// </summary>
+    [DataMember]
+    public bool CanSkip { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether this can be added to favorites.
+    /// </summary>
+    [DataMember]
+    public bool CanAddToFavorites { get; set; } = true;
 }
 
 /// <summary>
@@ -350,6 +393,13 @@ public class GetMediaURIResponse
     /// </summary>
     [DataMember]
     public List<HttpHeader>? HttpHeaders { get; set; }
+
+    /// <summary>
+    /// Optional protocol info string (e.g., "http-get:*:audio/flac:*")
+    /// to help Sonos decide transport/pipeline compatibility.
+    /// </summary>
+    [DataMember]
+    public string? ProtocolInfo { get; set; }
 }
 
 /// <summary>
